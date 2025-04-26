@@ -1,8 +1,3 @@
-# vil_main.py  (drop in repo root)
-# --------------------------------------------------------------
-# Run Versatile Incremental Learning with the *full* 7-RanPAC
-# pipeline (AdaptFormer + Random-Projection head + CP updates).
-# --------------------------------------------------------------
 import argparse, datetime, logging, os, sys, time, copy
 import numpy as np
 import torch, pandas as pd
@@ -59,7 +54,6 @@ class LoaderDataManager:
         self._num_classes  = num_classes
         self._increments   = [num_classes]       # one "big" task
 
-    # ---- API Learner expects -------------------------------------
     @property
     def nb_tasks(self):              # unused, but keep for safety
         return len(self._increments)
@@ -82,9 +76,8 @@ class LoaderDataManager:
         
         wrapped = IndexedDataset(ds)
         return wrapped if not ret_data else (None, None, wrapped)
-# ------------------------------------------------------------------ #
-# Metric helpers (원 논문 공식)
-# ------------------------------------------------------------------ #
+
+
 def evaluate_till_now(model, loaders, device, task_id,
                       acc_matrix, args):
     for t in range(task_id + 1):
@@ -113,9 +106,8 @@ def evaluate_till_now(model, loaders, device, task_id,
            f"Forgetting {forgetting:.4f}")
     logging.info(msg); print(msg)
     return A_last, A_avg, forgetting
-# ------------------------------------------------------------------ #
+
 def vil_train(args):
-    # --------------------------------------------------------- set-up
     devices = [torch.device(f'cuda:{d}') if d >= 0 else torch.device('cpu')
                for d in args.device]
     args.device = devices
@@ -130,39 +122,47 @@ def vil_train(args):
 
     num_tasks  = args.num_tasks
     acc_matrix = np.zeros((num_tasks, num_tasks))
-    log_book   = {"A_last": [], "A_avg": [], "Forgetting": []}
+    log_book   = {"A_last": [], "A_avg": [], "Forgetting": [], "Task_Time": []}
+    
+    total_start_time = time.time()
 
     for tid in range(num_tasks):
-        print(f"{' Training Task ' + str(tid+1):=^60}")
-        # -------------------------------------------- DataManager wrap
+        print(f"{' Training Task ' + str(tid):=^60}")
+        task_start_time = time.time()
+        
         dm = LoaderDataManager(loaders[tid], args.num_classes)
 
-        # ❶ reset task counters like core50 DIL path
         learner._cur_task            = -1
         learner._known_classes       = 0
         learner._classes_seen_so_far = 0
 
         learner.incremental_train(dm)      # FULL RanPAC pipeline
 
-        # -------------------------------------------------- evaluation
-        evaluate_till_now(learner, loaders, devices[0], tid,
-                          acc_matrix, args)
         A_last, A_avg, F = evaluate_till_now(
             learner, loaders, devices[0], tid, acc_matrix, args
         )
         log_book["A_last"].append(A_last)
         log_book["A_avg"].append(A_avg)
         log_book["Forgetting"].append(F)
+        
+        task_time = time.time() - task_start_time
+        log_book["Task_Time"].append(task_time)
+        
+        msg = f"[Task {tid+1:2d}] 소요 시간: {task_time:.2f}초 ({task_time/60:.2f}분)"
+        logging.info(msg)
+        print(msg)
 
-    # ---------------------------------------------- save CSV summary
+    total_time = time.time() - total_start_time
+    msg = f"\n전체 훈련 소요 시간: {total_time:.2f}초 ({total_time/60:.2f}분)"
+    logging.info(msg)
+    print(msg)
+
     os.makedirs("results", exist_ok=True)
     pd.DataFrame(log_book).to_csv("results/vil_metrics_ranpac.csv", index=False)
     print("\n✓ Finished — metrics in  results/vil_metrics_ranpac.csv")
 
-# ------------------------------------------------------------------ #
 def get_parser():
     p = argparse.ArgumentParser()
-    # ---- 기본 trainer 와 동일(필요한 것만 변경) -------------------
     p.add_argument("--seed",        type=int, default=1)
     p.add_argument("--device",      type=int, nargs='+', default=[0])
     p.add_argument("--model_name",  default="adapter")
@@ -175,7 +175,7 @@ def get_parser():
     p.add_argument("--M",           type=int, default=10000)
     p.add_argument("--tuned_epoch", type=int, default=5)
 
-    # ---------- VIL 전용 ------------------------------------------
+    #vil 
     p.add_argument("--num_tasks",   type=int, default=20)
     p.add_argument("--batch_size",  type=int, default=64)
     p.add_argument("--num_workers", type=int, default=8)

@@ -7,6 +7,7 @@ from tqdm import tqdm
 from continual_datasets.build_incremental_scenario import build_continual_dataloader
 from RanPAC import Learner
 from continual_datasets.dataset_utils import set_data_config
+from utils.acc_heatmap import save_accuracy_heatmap
 
 
 def seed_everything(seed: int = 42):
@@ -105,6 +106,10 @@ def evaluate_till_now(model, loaders, device, task_id,
            f"A_last {A_last:.2f} | A_avg {A_avg:.2f} | "
            f"Forgetting {forgetting:.4f}")
     logging.info(msg); print(msg)
+
+    sub_matrix = acc_matrix[:task_id+1, :task_id+1]
+    result = np.where(np.triu(np.ones_like(sub_matrix, dtype=bool)), sub_matrix, np.nan)
+    save_accuracy_heatmap(result, task_id, args)
     return A_last, A_avg, forgetting
 
 def vil_train(args):
@@ -150,7 +155,6 @@ def vil_train(args):
         
         msg = f"[Task {tid+1:2d}] 소요 시간: {task_time:.2f}초 ({task_time/60:.2f}분)"
         logging.info(msg)
-        print(msg)
 
     total_time = time.time() - total_start_time
     msg = f"\n전체 훈련 소요 시간: {total_time:.2f}초 ({total_time/60:.2f}분)"
@@ -183,6 +187,7 @@ def get_parser():
     p.add_argument("--shuffle",     action="store_true")
     p.add_argument("--IL_mode",     default="vil", type=str)
     p.add_argument("--dataset",     default="iDigits", type=str)
+    p.add_argument("--save",        default="./save", type=str)
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

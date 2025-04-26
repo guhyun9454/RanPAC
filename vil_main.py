@@ -6,12 +6,21 @@
 import argparse, datetime, logging, os, sys, time, copy
 import numpy as np
 import torch, pandas as pd
+import random
 from tqdm import tqdm
 
 from continual_datasets.build_incremental_scenario import build_continual_dataloader
 from RanPAC import Learner
 from continual_datasets.dataset_utils import set_data_config
 
+
+def seed_everything(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 class IndexedDataset(torch.utils.data.Dataset):
@@ -48,7 +57,7 @@ class LoaderDataManager:
         self._train_loader = loader_pair['train']
         self._val_loader   = loader_pair['val']
         self._num_classes  = num_classes
-        self._increments   = [num_classes]       # one “big” task
+        self._increments   = [num_classes]       # one "big" task
 
     # ---- API Learner expects -------------------------------------
     @property
@@ -110,7 +119,7 @@ def vil_train(args):
     devices = [torch.device(f'cuda:{d}') if d >= 0 else torch.device('cpu')
                for d in args.device]
     args.device = devices
-    torch.manual_seed(args.seed)
+    seed_everything(args.seed)
 
     loaders, class_mask, domain_list = build_continual_dataloader(args)
 

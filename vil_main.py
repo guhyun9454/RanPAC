@@ -84,7 +84,7 @@ class LoaderDataManager:
         
         # develop 모드이면 train loader를 iteration 제한 래퍼로 감싸기
         if args and args.develop:
-            self._train_loader = LimitIterationDataloader(self._train_loader, max_iterations=10)
+            self._train_loader = LimitIterationDataloader(self._train_loader, max_iterations=1)
             logging.info("개발 모드: 학습 dataloader iteration을 10회로 제한합니다.")
 
     @property
@@ -230,6 +230,8 @@ def vil_train(args):
     seed_everything(args.seed)
 
     loaders, class_mask, domain_list = build_continual_dataloader(args)
+    if args.ood_dataset:
+        loaders[-1]['ood'] = get_ood_dataset(args.ood_dataset, args)
 
     learner = Learner(vars(args))
     learner.is_dil   = True          # domain-IL branch

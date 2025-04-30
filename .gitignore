@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .cursor/
 save/
+test.txt
 
 # C extensions
 *.so

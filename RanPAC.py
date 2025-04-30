@@ -30,17 +30,17 @@ class BaseLearner(object):
         acc_total,grouped = self._evaluate(y_pred, y_true)
         return acc_total,grouped,y_pred[:,0],y_true
 
-    def _eval_cnn(self, loader):
-        self._network.eval()
-        y_pred, y_true = [], []
-        for _, (_, inputs, targets) in enumerate(loader):
-            inputs = inputs.to(self._device)
-            with torch.no_grad():
-                outputs = self._network(inputs)["logits"]
-            predicts = torch.topk(outputs, k=1, dim=1, largest=True, sorted=True)[1] 
-            y_pred.append(predicts.cpu().numpy())
-            y_true.append(targets.cpu().numpy())
-        return np.concatenate(y_pred), np.concatenate(y_true)  
+    # def _eval_cnn(self, loader):
+    #     self._network.eval()
+    #     y_pred, y_true = [], []
+    #     for _, (_, inputs, targets) in enumerate(loader):
+    #         inputs = inputs.to(self._device)
+    #         with torch.no_grad():
+    #             outputs = self._network(inputs)["logits"]
+    #         predicts = torch.topk(outputs, k=1, dim=1, largest=True, sorted=True)[1] 
+    #         y_pred.append(predicts.cpu().numpy())
+    #         y_true.append(targets.cpu().numpy())
+    #     return np.concatenate(y_pred), np.concatenate(y_true)  
     
     def _evaluate(self, y_pred, y_true):
         ret = {}

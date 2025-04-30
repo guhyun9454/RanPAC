@@ -44,6 +44,28 @@ class IndexedDataset(torch.utils.data.Dataset):
         return idx, img, label               # <- 3-tuple expected by Learner
 
 
+class LimitIterationDataloader:
+    """develop 모드에서 dataloader의 iteration 수를 제한하는 래퍼 클래스"""
+    def __init__(self, dataloader, max_iterations=10):
+        self.dataloader = dataloader
+        self.max_iterations = max_iterations
+        
+    def __iter__(self):
+        iterator = iter(self.dataloader)
+        for i in range(self.max_iterations):
+            try:
+                yield next(iterator)
+            except StopIteration:
+                break
+                
+    def __len__(self):
+        return min(len(self.dataloader), self.max_iterations)
+    
+    @property
+    def dataset(self):
+        return self.dataloader.dataset
+
+
 # ------------------------------------------------------------------ #
 # DataManager mock : just enough for Learner.incremental_train()
 # ------------------------------------------------------------------ #
@@ -54,11 +76,16 @@ class LoaderDataManager:
     original utils.data_manager.DataManager.
     Each task is treated as *domain-incremental*: head size == num_classes.
     """
-    def __init__(self, loader_pair, num_classes):
+    def __init__(self, loader_pair, num_classes, args=None):
         self._train_loader = loader_pair['train']
         self._val_loader   = loader_pair['val']
         self._num_classes  = num_classes
         self._increments   = [num_classes]       # one "big" task
+        
+        # develop 모드이면 train loader를 iteration 제한 래퍼로 감싸기
+        if args and args.develop:
+            self._train_loader = LimitIterationDataloader(self._train_loader, max_iterations=10)
+            logging.info("개발 모드: 학습 dataloader iteration을 10회로 제한합니다.")
 
     @property
     def nb_tasks(self):              # unused, but keep for safety
@@ -219,7 +246,7 @@ def vil_train(args):
         print(f"{' Training Task ' + str(tid):=^60}")
         task_start_time = time.time()
         
-        dm = LoaderDataManager(loaders[tid], args.num_classes)
+        dm = LoaderDataManager(loaders[tid], args.num_classes, args)
 
         learner._cur_task            = -1
         learner._known_classes       = 0

@@ -2,12 +2,17 @@ import argparse, datetime, logging, os, sys, time, copy
 import numpy as np
 import torch, pandas as pd
 import random
+import torch.nn.functional as F
 from tqdm import tqdm
+from sklearn.metrics import roc_curve, auc
 
 from continual_datasets.build_incremental_scenario import build_continual_dataloader
 from RanPAC import Learner
 from continual_datasets.dataset_utils import set_data_config
+from continual_datasets.dataset_utils import get_ood_dataset
+from continual_datasets.dataset_utils import RandomSampleWrapper
 from utils.acc_heatmap import save_accuracy_heatmap
+from utils import save_anomaly_histogram, save_logits_statistics
 
 
 def seed_everything(seed: int = 42):
@@ -112,6 +117,85 @@ def evaluate_till_now(model, loaders, device, task_id,
     save_accuracy_heatmap(result, task_id, args)
     return A_last, A_avg, forgetting
 
+def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
+    # learner._network를 사용해 MSP/ENERGY/KL OOD 지표 계산 (원본 Engine.evaluate_ood와 동일)
+    learner._network.eval()
+    ood_method = args.ood_method.upper()
+
+    def MSP(logits):
+        return F.softmax(logits, dim=1).max(dim=1)[0]
+
+    def ENERGY(logits):
+        return torch.logsumexp(logits, dim=1)
+
+    def KL(logits):
+        return F.cross_entropy(logits, torch.ones_like(logits) / logits.shape[-1], reduction='none')
+
+    # 1) 데이터셋 크기 맞추기
+    id_size  = len(id_datasets)
+    ood_size = len(ood_dataset)
+    min_size = min(id_size, ood_size)
+    if args.develop:
+        min_size = 1000
+    if args.verbose:
+        print(f"ID size: {id_size}, OOD size: {ood_size}, using {min_size} samples each")
+
+    id_aligned  = RandomSampleWrapper(id_datasets, min_size, args.seed) if id_size > min_size else id_datasets
+    ood_aligned = RandomSampleWrapper(ood_dataset, min_size, args.seed) if ood_size > min_size else ood_dataset
+
+    id_loader  = torch.utils.data.DataLoader(id_aligned,  batch_size=args.batch_size,
+                                              shuffle=False, num_workers=args.num_workers)
+    ood_loader = torch.utils.data.DataLoader(ood_aligned, batch_size=args.batch_size,
+                                              shuffle=False, num_workers=args.num_workers)
+
+    # 2) 로짓 수집
+    id_logits_list, ood_logits_list = [], []
+    with torch.no_grad():
+        for x, _ in id_loader:
+            x = x.to(device)
+            logits = learner._network(x)["logits"]
+            id_logits_list.append(logits.cpu())
+        for x, _ in ood_loader:
+            x = x.to(device)
+            logits = learner._network(x)["logits"]
+            ood_logits_list.append(logits.cpu())
+
+    id_logits  = torch.cat(id_logits_list,  dim=0)
+    ood_logits = torch.cat(ood_logits_list, dim=0)
+
+    # 3) 통계 저장 (선택)
+    if args.save:
+        save_logits_statistics(id_logits, ood_logits, args, task_id or 0)
+
+    # 4) 레이블 및 평가 준비
+    binary_labels = np.concatenate([np.ones(id_logits.shape[0]), np.zeros(ood_logits.shape[0])])
+    methods = ["MSP","ENERGY","KL"] if ood_method=="ALL" else [ood_method]
+    results = {}
+
+    for m in methods:
+        if m == "MSP":
+            id_scores, ood_scores = MSP(id_logits), MSP(ood_logits)
+        elif m == "ENERGY":
+            id_scores, ood_scores = ENERGY(id_logits), ENERGY(ood_logits)
+        else:  # KL
+            id_scores, ood_scores = KL(id_logits), KL(ood_logits)
+
+        if args.verbose:
+            save_anomaly_histogram(id_scores.cpu().numpy(),
+                                   ood_scores.cpu().numpy(),
+                                   args, suffix=m.lower(), task_id=task_id)
+
+        all_scores = torch.cat([id_scores, ood_scores], dim=0).cpu().numpy()
+        fpr, tpr, _ = roc_curve(binary_labels, all_scores, drop_intermediate=False)
+        auroc = auc(fpr, tpr)
+        idx95 = np.abs(tpr - 0.95).argmin()
+        fpr95 = fpr[idx95]
+
+        print(f"[{m}] AUROC: {auroc*100:.2f}%, FPR@TPR95: {fpr95*100:.2f}%")
+        results[m] = {"auroc": auroc, "fpr_at_tpr95": fpr95, "scores": all_scores}
+
+    return results
+
 def vil_train(args):
     devices = [torch.device(f'cuda:{d}') if d >= 0 else torch.device('cpu')
                for d in args.device]
@@ -150,6 +234,18 @@ def vil_train(args):
         log_book["A_avg"].append(A_avg)
         log_book["Forgetting"].append(F)
         
+        learner._network.eval()
+        if args.ood_dataset:
+            print(f"{' Running OOD Eval after Task '+str(tid):=^60}")
+            # ID val dataset 합치기
+            id_val_sets = [loaders[t]['val'].dataset for t in range(tid+1)]
+            id_datasets = torch.utils.data.ConcatDataset(id_val_sets)
+            ood_dataset = loaders[-1]['ood']
+            # evaluate_ood() 호출 (원본과 동일한 로직)
+            _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid)
+        else:
+            print("OOD 평가를 위한 데이터셋이 지정되지 않았습니다.")
+
         task_time = time.time() - task_start_time
         log_book["Task_Time"].append(task_time)
         
@@ -188,6 +284,10 @@ def get_parser():
     p.add_argument("--IL_mode",     default="vil", type=str)
     p.add_argument("--dataset",     default="iDigits", type=str)
     p.add_argument("--save",        default="./save", type=str)
+    p.add_argument("--ood_dataset", default=None, type=str)
+    p.add_argument("--ood_method", default="ALL", choices=["MSP","ENERGY","KL","ALL"])
+    p.add_argument("--verbose", action="store_true")
+    p.add_argument("--develop", action="store_true")
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

@@ -136,7 +136,7 @@ def evaluate_till_now(model, loaders, device, task_id,
 
     msg = (f"[Task {task_id+1:2d}] "
            f"A_last {A_last:.2f} | A_avg {A_avg:.2f} | "
-           f"Forgetting {forgetting:.4f}")
+           f"Forgetting {forgetting:.2f}")
     logging.info(msg); print(msg)
 
     sub_matrix = acc_matrix[:task_id+1, :task_id+1]

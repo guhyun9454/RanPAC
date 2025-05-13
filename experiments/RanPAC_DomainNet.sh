@@ -13,6 +13,6 @@ for (( SEED=$START_SEED; SEED<=$END_SEED; SEED++ )); do
     --seed $SEED \
     --ood_dataset CORe50 \
     --use_RP --M 10000 \
-    --wandb_project iDigits_OODVIL_seed_tuning \
+    --wandb_project DomainNet_OODVIL_seed_tuning \
     --wandb_run "${SEED}_RanPAC"
 done

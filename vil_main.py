@@ -245,7 +245,7 @@ def vil_train(args):
         import getpass
         
         args.wandb = True
-        wandb.init(entity="OOD-VIL", project=args.wandb_project, name=args.wandb_run, config=args)
+        wandb.init(entity="OODVIL", project=args.wandb_project, name=args.wandb_run, config=args)
         wandb.config.update({"username": getpass.getuser()})
     else:
         args.wandb = False

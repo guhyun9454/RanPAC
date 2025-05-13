@@ -138,6 +138,11 @@ def evaluate_till_now(model, loaders, device, task_id,
            f"A_last {A_last:.2f} | A_avg {A_avg:.2f} | "
            f"Forgetting {forgetting:.2f}")
     logging.info(msg); print(msg)
+    
+    # wandb 로깅 추가
+    if args.wandb:
+        import wandb
+        wandb.log({"A_last (↑)": A_last, "A_avg (↑)": A_avg, "Forgetting (↓)": forgetting, "TASK": task_id})
 
     sub_matrix = acc_matrix[:task_id+1, :task_id+1]
     result = np.where(np.triu(np.ones_like(sub_matrix, dtype=bool)), sub_matrix, np.nan)
@@ -220,6 +225,11 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
 
         print(f"[{m}] AUROC: {auroc*100:.2f}%, FPR@TPR95: {fpr95*100:.2f}%")
         results[m] = {"auroc": auroc, "fpr_at_tpr95": fpr95, "scores": all_scores}
+        
+        # wandb 로깅 추가
+        if args.wandb:
+            import wandb
+            wandb.log({f"{m}_AUROC (↑)": auroc * 100, f"{m}_FPR@TPR95 (↓)": fpr95 * 100, "TASK": task_id})
 
     return results
 
@@ -228,6 +238,17 @@ def vil_train(args):
                for d in args.device]
     args.device = devices
     seed_everything(args.seed)
+    
+    # wandb 초기화
+    if args.wandb_run and args.wandb_project:
+        import wandb
+        import getpass
+        
+        args.wandb = True
+        wandb.init(entity="OOD-VIL", project=args.wandb_project, name=args.wandb_run, config=args)
+        wandb.config.update({"username": getpass.getuser()})
+    else:
+        args.wandb = False
 
     loaders, class_mask, domain_list = build_continual_dataloader(args)
     if args.ood_dataset:
@@ -317,6 +338,10 @@ def get_parser():
     p.add_argument("--ood_method", default="ALL", choices=["MSP","ENERGY","KL","ALL"])
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--develop", action="store_true")
+    
+    # wandb 관련 인자 추가
+    p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name")
+    p.add_argument("--wandb_project", type=str, default=None, help="Wandb project name")
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

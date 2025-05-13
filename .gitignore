@@ -155,6 +155,5 @@ cython_debug/
 #.idea/
 data/**/*.*
 data/**
-experiments/**
 figures**
 results/**

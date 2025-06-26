@@ -210,7 +210,8 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
     # 3) tSNE 시각화
     if args.wandb:
         # tSNE 샘플 수 제한 (시간 절약)
-        tsne_samples = min(5000, len(id_features) + len(ood_features))
+        max_tsne_samples = 500 if args.develop else 5000
+        tsne_samples = min(max_tsne_samples, len(id_features) + len(ood_features))
         id_tsne_samples = int(tsne_samples * len(id_features) / (len(id_features) + len(ood_features)))
         ood_tsne_samples = tsne_samples - id_tsne_samples
         

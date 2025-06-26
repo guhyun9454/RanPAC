@@ -5,6 +5,8 @@ import random
 import torch.nn.functional as F
 from tqdm import tqdm
 from sklearn.metrics import roc_curve, auc
+import matplotlib
+matplotlib.use('Agg')  # GUI 없는 환경에서도 동작하도록 설정
 
 from continual_datasets.build_incremental_scenario import build_continual_dataloader
 from RanPAC import Learner
@@ -180,26 +182,98 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
     ood_loader = torch.utils.data.DataLoader(ood_aligned, batch_size=args.batch_size,
                                               shuffle=False, num_workers=args.num_workers)
 
-    # 2) 로짓 수집
+    # 2) 로짓 및 feature 수집
     id_logits_list, ood_logits_list = [], []
+    id_features_list, ood_features_list = [], []
+    id_labels_list = []
+    
     with torch.no_grad():
-        for x, _ in id_loader:
+        for x, y in id_loader:
             x = x.to(device)
-            logits = learner._network(x)["logits"]
-            id_logits_list.append(logits.cpu())
+            outputs = learner._network(x)
+            id_logits_list.append(outputs["logits"].cpu())
+            id_features_list.append(outputs["features"].cpu())
+            id_labels_list.append(y.cpu())
+            
         for x, _ in ood_loader:
             x = x.to(device)
-            logits = learner._network(x)["logits"]
-            ood_logits_list.append(logits.cpu())
+            outputs = learner._network(x)
+            ood_logits_list.append(outputs["logits"].cpu())
+            ood_features_list.append(outputs["features"].cpu())
 
     id_logits  = torch.cat(id_logits_list,  dim=0)
     ood_logits = torch.cat(ood_logits_list, dim=0)
+    id_features = torch.cat(id_features_list, dim=0)
+    ood_features = torch.cat(ood_features_list, dim=0)
+    id_labels = torch.cat(id_labels_list, dim=0)
 
-    # 3) 통계 저장 (선택)
+    # 3) tSNE 시각화
+    if args.wandb:
+        # tSNE 샘플 수 제한 (시간 절약)
+        tsne_samples = min(5000, len(id_features) + len(ood_features))
+        id_tsne_samples = int(tsne_samples * len(id_features) / (len(id_features) + len(ood_features)))
+        ood_tsne_samples = tsne_samples - id_tsne_samples
+        
+        # 랜덤 샘플링
+        id_indices = torch.randperm(len(id_features))[:id_tsne_samples]
+        ood_indices = torch.randperm(len(ood_features))[:ood_tsne_samples]
+        
+        sampled_id_features = id_features[id_indices].numpy()
+        sampled_ood_features = ood_features[ood_indices].numpy()
+        sampled_id_labels = id_labels[id_indices].numpy()
+        
+        # 모든 feature 합치기
+        all_features = np.concatenate([sampled_id_features, sampled_ood_features], axis=0)
+        
+        # tSNE 적용
+        from sklearn.manifold import TSNE
+        tsne = TSNE(n_components=2, random_state=args.seed, perplexity=30)
+        features_2d = tsne.fit_transform(all_features)
+        
+        # ID와 OOD 분리
+        id_features_2d = features_2d[:id_tsne_samples]
+        ood_features_2d = features_2d[id_tsne_samples:]
+        
+        # 시각화
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        
+        plt.figure(figsize=(10, 8))
+        
+        # ID 데이터 클래스별로 다른 색상 (tab10)
+        unique_labels = np.unique(sampled_id_labels)
+        colors = cm.get_cmap('tab10')
+        
+        for i, label in enumerate(unique_labels):
+            mask = sampled_id_labels == label
+            plt.scatter(id_features_2d[mask, 0], id_features_2d[mask, 1], 
+                       c=[colors(i % 10)], label=f'ID Class {label}', alpha=0.6, s=20)
+        
+        # OOD 데이터는 검은색
+        plt.scatter(ood_features_2d[:, 0], ood_features_2d[:, 1], 
+                   c='black', label='OOD', alpha=0.6, s=20)
+        
+        plt.title(f'Task {task_id+1}: tSNE of ID vs OOD Features')
+        plt.xlabel('tSNE-1')
+        plt.ylabel('tSNE-2')
+        
+        # 범례가 너무 많으면 생략
+        if len(unique_labels) <= 10:
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., fontsize=8)
+        
+        plt.tight_layout()
+        
+        # wandb에 로그
+        if args.wandb:
+            import wandb
+            wandb.log({f"tSNE_Task_{task_id+1}": wandb.Image(plt), "TASK": task_id})
+        plt.close()
+
+    # 4) 통계 저장 (선택)
     if args.save:
         save_logits_statistics(id_logits, ood_logits, args, task_id or 0)
 
-    # 4) 레이블 및 평가 준비
+    # 5) 레이블 및 평가 준비
     binary_labels = np.concatenate([np.ones(id_logits.shape[0]), np.zeros(ood_logits.shape[0])])
     methods = ["MSP","ENERGY","KL"] if ood_method=="ALL" else [ood_method]
     results = {}

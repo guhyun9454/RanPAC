@@ -161,5 +161,19 @@ def save_anomaly_histogram(id_scores, ood_scores, args, suffix=None, task_id=Non
     plt.legend()
     plt.tight_layout()
     plt.savefig(save_path)
+    
+    # wandb에 로깅 (설정되어 있는 경우)
+    if args.wandb:
+        import wandb
+        
+        # wandb 로그 이름 생성
+        log_name = f"Anomaly_Histogram"
+        if suffix:
+            log_name += f"_{suffix.upper()}"
+        if task_id is not None:
+            log_name += f"_Task_{task_id+1}"
+        
+        wandb.log({log_name: wandb.Image(plt), "TASK": task_id if task_id is not None else 0})
+    
     plt.close()
     print(f"Histogram saved to {save_path}") 

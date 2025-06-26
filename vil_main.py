@@ -178,9 +178,9 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
     ood_aligned = RandomSampleWrapper(ood_dataset, min_size, args.seed) if ood_size > min_size else ood_dataset
 
     id_loader  = torch.utils.data.DataLoader(id_aligned,  batch_size=args.batch_size,
-                                              shuffle=False, num_workers=args.num_workers)
+                                              shuffle=False, num_workers=0)
     ood_loader = torch.utils.data.DataLoader(ood_aligned, batch_size=args.batch_size,
-                                              shuffle=False, num_workers=args.num_workers)
+                                              shuffle=False, num_workers=0)
 
     # 2) 로짓 및 feature 수집
     id_logits_list, ood_logits_list = [], []
@@ -305,6 +305,9 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
             import wandb
             wandb.log({f"{m}_AUROC (↑)": auroc * 100, f"{m}_FPR@TPR95 (↓)": fpr95 * 100, "TASK": task_id})
 
+    # 메모리 정리 - 데이터로더 명시적 삭제
+    del id_loader, ood_loader, id_aligned, ood_aligned
+    
     return results
 
 def vil_train(args):

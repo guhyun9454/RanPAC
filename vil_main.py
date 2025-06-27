@@ -87,7 +87,7 @@ class LoaderDataManager:
         # develop 모드이면 train loader를 iteration 제한 래퍼로 감싸기
         if args and args.develop:
             self._train_loader = LimitIterationDataloader(self._train_loader, max_iterations=1)
-            logging.info("개발 모드: 학습 dataloader iteration을 10회로 제한합니다.")
+            logging.info("개발 모드: 학습 dataloader iteration을 1회로 제한합니다.")
 
     @property
     def nb_tasks(self):              # unused, but keep for safety
@@ -190,16 +190,30 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
     with torch.no_grad():
         for x, y in id_loader:
             x = x.to(device)
-            outputs = learner._network(x)
-            id_logits_list.append(outputs["logits"].cpu())
-            id_features_list.append(outputs["features"].cpu())
+            
+            # Features는 convnet에서 직접 추출
+            conv_features = learner._network.convnet(x)
+            
+            # Network 전체 출력 (CosineLinear가 {'logits': out} 반환)
+            network_output = learner._network(x)
+            
+            # CosineLinear는 항상 {'logits': out} 딕셔너리를 반환
+            # SimpleVitNet.forward()에서 그대로 반환됨
+            logits = network_output['logits']
+            
+            id_logits_list.append(logits.cpu())
+            id_features_list.append(conv_features.cpu())
             id_labels_list.append(y.cpu())
             
         for x, _ in ood_loader:
             x = x.to(device)
-            outputs = learner._network(x)
-            ood_logits_list.append(outputs["logits"].cpu())
-            ood_features_list.append(outputs["features"].cpu())
+            
+            conv_features = learner._network.convnet(x)
+            network_output = learner._network(x)
+            logits = network_output['logits']
+                
+            ood_logits_list.append(logits.cpu())
+            ood_features_list.append(conv_features.cpu())
 
     id_logits  = torch.cat(id_logits_list,  dim=0)
     ood_logits = torch.cat(ood_logits_list, dim=0)
@@ -228,7 +242,9 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
         
         # tSNE 적용
         from sklearn.manifold import TSNE
-        tsne = TSNE(n_components=2, random_state=args.seed, perplexity=30)
+        # perplexity를 샘플 수에 맞게 동적 조정 (일반적으로 샘플 수의 1/10 ~ 1/3 정도)
+        perplexity = min(30, max(5, tsne_samples // 10))
+        tsne = TSNE(n_components=2, random_state=args.seed, perplexity=perplexity)
         features_2d = tsne.fit_transform(all_features)
         
         # ID와 OOD 분리

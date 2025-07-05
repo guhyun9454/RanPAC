@@ -281,7 +281,9 @@ class Learner(BaseLearner):
                     if "_ood_iter" not in locals():
                         from itertools import cycle
                         from continual_datasets.dataset_utils import get_ood_dataset
-                        ood_ds = get_ood_dataset(self.args["ood_dataset"], self.args)
+                        import argparse
+                        args_ns = argparse.Namespace(**self.args)
+                        ood_ds = get_ood_dataset(self.args["ood_dataset"], args_ns)
                         ood_loader = DataLoader(ood_ds, batch_size=self._batch_size, shuffle=True, num_workers=num_workers)
                         _ood_iter = cycle(ood_loader)
                     ood_inputs, _ = next(_ood_iter)

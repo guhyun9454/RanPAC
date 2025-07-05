@@ -240,6 +240,10 @@ class Learner(BaseLearner):
                 self.dil_init=True
                 self._network.fc.weight.data.fill_(0.0)
             self.replace_fc(train_loader_for_CPs)
+            # Optional pseudo-OOD fine-tuning after replacing the classification head
+            if self.args.get("use_pood", False):
+                logging.info("Starting pseudo-OOD fine-tuning on classification head (task {})".format(self._cur_task))
+                self.pseudo_ood_finetune(train_loader)
             self.show_num_params()
         
     
@@ -268,7 +272,42 @@ class Learner(BaseLearner):
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
-                loss = F.cross_entropy(logits, targets)
+                loss_ce = F.cross_entropy(logits, targets)
+
+                # ------------------------------------------------------------------
+                # Real OOD cheating (upper bound)
+                # ------------------------------------------------------------------
+                if self.args.get("cheat_use_ood", False) and self.args.get("ood_dataset") is not None:
+                    if "_ood_iter" not in locals():
+                        from itertools import cycle
+                        from continual_datasets.dataset_utils import get_ood_dataset
+                        ood_ds = get_ood_dataset(self.args["ood_dataset"], self.args)
+                        ood_loader = DataLoader(ood_ds, batch_size=self._batch_size, shuffle=True, num_workers=num_workers)
+                        _ood_iter = cycle(ood_loader)
+                    ood_inputs, _ = next(_ood_iter)
+                    ood_inputs = ood_inputs.to(self._device)
+                    with torch.no_grad():
+                        feat_ood = self._network.convnet(ood_inputs)
+                    logits_ood = self._network.fc(feat_ood)["logits"]
+                    uniform_ood = torch.full_like(logits_ood, 1.0 / self._classes_seen_so_far)
+                    loss_ood_true = F.kl_div(F.log_softmax(logits_ood, dim=1), uniform_ood, reduction='batchmean')
+                else:
+                    loss_ood_true = 0.0
+
+                # pseudo-OOD regularisation (only if enabled)
+                if self.args.get("use_pood", False):
+                    with torch.no_grad():
+                        features = self._network.convnet(inputs)
+                    idx_perm = torch.randperm(features.size(0))
+                    alpha = self.args.get("pood_alpha", 1.0)
+                    pseudo_feats = features + alpha * (features - features[idx_perm])
+                    pseudo_logits = self._network.fc(pseudo_feats)["logits"]
+                    uniform_target = torch.full_like(pseudo_logits, 1.0 / self._classes_seen_so_far)
+                    loss_ood = F.kl_div(F.log_softmax(pseudo_logits, dim=1), uniform_target, reduction='batchmean')
+                    loss = loss_ce + self.args.get("pood_lambda", 0.1) * loss_ood + self.args.get("cheat_ood_lambda", 0.1) * loss_ood_true
+                else:
+                    loss = loss_ce + self.args.get("cheat_ood_lambda", 0.1) * loss_ood_true
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -292,5 +331,52 @@ class Learner(BaseLearner):
         logging.info(info)
         
     
+    # ------------------------------------------------------------------ #
+    # Pseudo-OOD fine-tuning (classification head only)
+    # ------------------------------------------------------------------ #
+    def pseudo_ood_finetune(self, loader):
+        """Fine-tune the classification head with pseudo-OOD regularisation.
+
+        This operates only on the FC layer (fast) and keeps the backbone frozen.
+        """
+        if loader is None:
+            return
+
+        self._network.train()
+        # Freeze backbone to keep feature extractor intact
+        for p in self._network.convnet.parameters():
+            p.requires_grad = False
+
+        optimizer = optim.SGD(self._network.fc.parameters(), lr=self.args.get("head_lr", 0.01), momentum=0.9)
+
+        for epoch in range(self.args.get("pood_epochs", 1)):
+            running_loss = 0.0
+            for _, (_, inputs, targets) in enumerate(loader):
+                inputs, targets = inputs.to(self._device), targets.to(self._device)
+
+                # ID loss
+                with torch.no_grad():
+                    features = self._network.convnet(inputs)
+                logits_id = self._network.fc(features)["logits"]
+                loss_ce = F.cross_entropy(logits_id, targets)
+
+                # Generate pseudo-OOD features by extrapolation
+                idx_perm = torch.randperm(features.size(0))
+                alpha = self.args.get("pood_alpha", 1.0)
+                pseudo_feats = features + alpha * (features - features[idx_perm])
+                pseudo_logits = self._network.fc(pseudo_feats)["logits"]
+
+                uniform_target = torch.full_like(pseudo_logits, 1.0 / self._classes_seen_so_far)
+                loss_ood = F.kl_div(F.log_softmax(pseudo_logits, dim=1), uniform_target, reduction='batchmean')
+
+                loss = loss_ce + self.args.get("pood_lambda", 0.1) * loss_ood
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item()
+
+            logging.info(f"[Pseudo-OOD] Epoch {epoch+1}/{self.args.get('pood_epochs', 1)} | Loss {running_loss/len(loader):.3f}")
 
    

@@ -348,6 +348,22 @@ def get_parser():
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name")
     p.add_argument("--wandb_project", type=str, default=None, help="Wandb project name")
 
+    # pseudo OOD training arguments
+    p.add_argument("--use_pood", action="store_true",
+                   help="Enable pseudo-OOD extrapolation based regularisation during training")
+    p.add_argument("--pood_alpha", type=float, default=1.0,
+                   help="Extrapolation magnitude for pseudo-OOD feature generation (f_i + alpha*(f_i - f_j))")
+    p.add_argument("--pood_lambda", type=float, default=0.1,
+                   help="Weight for the KL-divergence loss on pseudo-OOD samples")
+    p.add_argument("--pood_epochs", type=int, default=1,
+                   help="Number of epochs to fine-tune the classification head with pseudo-OOD samples after each task")
+
+    # cheating with real OOD during training (upper bound)
+    p.add_argument("--cheat_use_ood", action="store_true",
+                   help="Use true OOD dataset during training for upper-bound experiments (requires --ood_dataset)")
+    p.add_argument("--cheat_ood_lambda", type=float, default=0.1,
+                   help="Weight for KL loss on real OOD samples when cheating is enabled")
+
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)
     p.add_argument("--print_freq",  type=int, default=1)

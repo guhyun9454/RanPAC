@@ -1,0 +1,45 @@
+program: vil_main.py
+method: random
+
+command:
+  - python
+  - vil_main.py
+  - --dataset
+  - iDigits
+  - --num_tasks
+  - 20
+  - --IL_mode
+  - vil
+  - --data_path
+  - /local_datasets
+  - --seed
+  - 16
+  - --ood_dataset
+  - EMNIST
+  - --use_RP
+  - --M
+  - 10000
+  - --model_name
+  - adapter
+  - --convnet_type
+  - pretrained_vit_b16_224_adapter
+  - --wandb_project
+  - iDigits_POOD
+  - --wandb_run
+  - pood_sweep_run
+  - --use_pood
+  - ${args}
+
+parameters:
+  pood_alpha:
+    min: 0.5
+    max: 2.0
+  pood_lambda:
+    min: 0.05
+    max: 0.3
+  pood_epochs:
+    values: [1, 2, 3, 4, 5]
+  body_lr:
+    values: [0.005, 0.01, 0.02, 0.03, 0.04, 0.05]
+  head_lr:
+    values: [0.005, 0.01, 0.02, 0.03, 0.04, 0.05]

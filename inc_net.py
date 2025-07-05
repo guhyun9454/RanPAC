@@ -32,11 +32,12 @@ class CosineLinear(nn.Module):
             out = F.linear(F.normalize(input, p=2, dim=1), F.normalize(self.weight, p=2, dim=1))
         else:
             if self.W_rand is not None:
-                inn = torch.nn.functional.relu(input @ self.W_rand) # input: (B,768) W_rand: (768,M)
+                inn = torch.nn.functional.relu(input @ self.W_rand)  # (B, M)
             else:
-                inn=input
-                #inn=torch.bmm(input[:,0:100].unsqueeze(-1), input[:,0:100].unsqueeze(-2)).flatten(start_dim=1) #interaction terms instead of RP
-            out = F.linear(inn,self.weight)
+                inn = input
+            # 값 폭발 방지를 위해 cosine 정규화 적용
+            out = F.linear(F.normalize(inn, p=2, dim=1, eps=1e-12),
+                           F.normalize(self.weight, p=2, dim=1, eps=1e-12))
 
         if self.to_reduce:
             # Reduce_proxy

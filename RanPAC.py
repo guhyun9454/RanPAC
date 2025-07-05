@@ -85,8 +85,28 @@ class Learner(BaseLearner):
             self._batch_size= args["batch_size"]
         self.args=args
 
+        # ------------------------------------------------------------ #
+        # Prototype-dictionary (multi-prototype per class) for PBL
+        # ------------------------------------------------------------ #
+        # {class_id: [(center(Tensor), radius(float)), ...]}
+        self.prototypes = {}
+
+        # Hyper-parameters (with safe default fallbacks)
+        self.pbl_tau_split   = args.get("pbl_tau_split", 150.0)  # distance threshold to spawn new prototype (increased for ViT)
+        self.pbl_alpha       = args.get("pbl_alpha",     0.1)    # EMA ratio when updating prototype center/radius
+        self.pbl_max_protos  = args.get("pbl_max_protos", 5)    # max prototypes per class
+        
+        # Adaptive threshold calculation
+        self.feature_stats = {}  # {class_id: {'mean_dist': float, 'count': int}}
+
     def after_task(self):
         self._known_classes = self._classes_seen_so_far
+        
+        # 각 task 종료 후 프로토타입 통계 출력
+        if self.prototypes:
+            total_protos = sum(len(plist) for plist in self.prototypes.values())
+            class_stats = {cid: len(plist) for cid, plist in self.prototypes.items()}
+            logging.info(f"[PBL] End of task - Total prototypes: {total_protos}, Per class: {class_stats}")
     
     def replace_fc(self,trainloader):
         self._network = self._network.eval()
@@ -101,6 +121,7 @@ class Learner(BaseLearner):
 
         Features_f = []
         label_list = []
+        batch_count = 0
         with torch.no_grad():
             for i, batch in enumerate(trainloader):
                 (_,data,label)=batch
@@ -109,6 +130,15 @@ class Learner(BaseLearner):
                 embedding = self._network.convnet(data)
                 Features_f.append(embedding.cpu())
                 label_list.append(label.cpu())
+
+                # ---------------- PBL prototype assignment ---------------- #
+                with torch.no_grad():
+                    for feat_t, lbl_t in zip(embedding, label):
+                        self._pbl_assign_prototype(lbl_t.item(), feat_t.detach())
+                
+                batch_count += 1
+                if batch_count >= 10:  # 프로토타입 생성은 처음 10 배치만으로 제한
+                    break
         Features_f = torch.cat(Features_f, dim=0)
         label_list = torch.cat(label_list, dim=0)
         
@@ -292,5 +322,78 @@ class Learner(BaseLearner):
         logging.info(info)
         
     
+    # ---------- Prototype helpers ---------- #
+    def _pbl_init_prototype(self, feature: torch.Tensor):
+        """Create first prototype for a class."""
+        center = feature.detach().clone()
+        radius = torch.tensor(0.1, device=center.device)  # Small initial radius for cosine similarity
+        return [center, radius]
+
+    def _pbl_update_prototype(self, proto, feature: torch.Tensor):
+        """EMA-update center & radius for an existing prototype."""
+        center, radius = proto
+        center.data = (1 - self.pbl_alpha) * center.data + self.pbl_alpha * feature.detach()
+        # Use cosine similarity for consistency
+        sim = F.cosine_similarity(feature.detach().unsqueeze(0), center.data.unsqueeze(0), dim=1)
+        cosine_dist = 1.0 - sim.item()  # convert to distance-like metric
+        dist = torch.tensor(cosine_dist, device=center.device)
+        radius.data = (1 - self.pbl_alpha) * radius.data + self.pbl_alpha * dist
+        return [center, radius]
+
+    def _pbl_assign_prototype(self, class_id: int, feature: torch.Tensor):
+        """Assign feature to nearest prototype or spawn new one."""
+        if class_id not in self.prototypes or len(self.prototypes[class_id]) == 0:
+            self.prototypes.setdefault(class_id, []).append(self._pbl_init_prototype(feature))
+            logging.info(f"[PBL] Class {class_id}: Created first prototype (total: 1)")
+            return 0
+
+        # 클래스당 최대 프로토타입 개수 제한
+        if len(self.prototypes[class_id]) >= self.pbl_max_protos:
+            # 가장 가까운 프로토타입 업데이트만 수행
+            dists = [torch.norm(feature - p[0], p=2) for p in self.prototypes[class_id]]
+            min_idx = int(torch.argmin(torch.stack(dists)))
+            self.prototypes[class_id][min_idx] = self._pbl_update_prototype(self.prototypes[class_id][min_idx], feature)
+            return min_idx
+
+        # find closest prototype center using cosine similarity
+        similarities = []
+        for center, radius in self.prototypes[class_id]:
+            # cosine similarity (higher = more similar)
+            sim = F.cosine_similarity(feature.unsqueeze(0), center.unsqueeze(0), dim=1)
+            similarities.append(sim.item())
+        
+        max_sim = max(similarities)
+        max_idx = similarities.index(max_sim)
+        
+        # Convert similarity to distance-like metric (lower = more similar)
+        min_dist = 1.0 - max_sim  # range [0, 2], 0 means identical
+
+        # spawn new prototype if too dissimilar (adaptive threshold)
+        # For cosine similarity, threshold should be small (0.1 ~ 0.5)
+        effective_threshold = min(0.3, self.pbl_tau_split / 500.0)  # convert large tau_split to small cosine threshold
+        
+        if min_dist > effective_threshold:
+            self.prototypes[class_id].append(self._pbl_init_prototype(feature))
+            new_idx = len(self.prototypes[class_id]) - 1
+            logging.info(f"[PBL] Class {class_id}: Created new prototype (cosine_dist: {min_dist:.3f} > {effective_threshold:.3f}, total: {len(self.prototypes[class_id])})")
+            return new_idx
+        else:
+            # update chosen prototype
+            self.prototypes[class_id][max_idx] = self._pbl_update_prototype(self.prototypes[class_id][max_idx], feature)
+            return max_idx
+
+    # ---------- OOD score based on prototypes ---------- #
+    def compute_ood_score(self, feature_np: np.ndarray):
+        """Compute PBL distance-based OOD score; lower means more ID-like."""
+        feat = torch.from_numpy(feature_np).to(self._device)
+        min_score = float('inf')
+        for class_id, plist in self.prototypes.items():
+            for center, radius in plist:
+                # Use cosine similarity for consistency
+                sim = F.cosine_similarity(feat.unsqueeze(0), center.unsqueeze(0), dim=1)
+                cosine_dist = 1.0 - sim.item()  # convert to distance-like metric
+                score = cosine_dist / (radius + 1e-6)
+                min_score = min(min_score, score.item())
+        return min_score
 
    

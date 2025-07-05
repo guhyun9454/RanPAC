@@ -1,5 +1,7 @@
 program: vil_main.py
 method: random
+entity: OODVIL
+project: iDigits_POOD
 
 command:
   - python
@@ -26,7 +28,7 @@ command:
   - --wandb_project
   - iDigits_POOD
   - --wandb_run
-  - pood_sweep_run
+  - sweep_run_${{wandb.run.name}}
   - --use_pood
   - ${args}
 

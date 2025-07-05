@@ -370,7 +370,7 @@ class Learner(BaseLearner):
 
         # spawn new prototype if too dissimilar (adaptive threshold)
         # For cosine similarity, threshold should be small (0.1 ~ 0.5)
-        effective_threshold = min(0.3, self.pbl_tau_split / 500.0)  # convert large tau_split to small cosine threshold
+        effective_threshold = self.pbl_tau_split
         
         if min_dist > effective_threshold:
             self.prototypes[class_id].append(self._pbl_init_prototype(feature))

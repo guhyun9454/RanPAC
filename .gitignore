@@ -157,3 +157,4 @@ data/**/*.*
 data/**
 figures**
 results/**
+/wandb

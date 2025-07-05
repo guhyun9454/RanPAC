@@ -239,6 +239,11 @@ def vil_train(args):
     args.device = devices
     seed_everything(args.seed)
     
+    # develop 모드일 경우 tuned_epoch을 1로 설정
+    if args.develop:
+        args.tuned_epoch = 1
+        logging.info("개발 모드: tuned_epoch을 1로 설정합니다.")
+    
     # wandb 초기화
     if args.wandb_run and args.wandb_project:
         import wandb

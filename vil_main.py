@@ -172,7 +172,15 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
 
     # 2) 평가할 방법 결정
     from OODdetectors.ood_adapter import SUPPORTED_METHODS, compute_ood_scores
-    methods = SUPPORTED_METHODS if ood_method == "ALL" else [ood_method]
+    if ood_method == "ALL":
+        methods = SUPPORTED_METHODS
+    else:
+        # 쉼표로 구분된 메소드들 처리
+        methods = [method.strip().upper() for method in ood_method.split(',')]
+        # 지원되지 않는 메소드 확인
+        unsupported = [m for m in methods if m not in SUPPORTED_METHODS]
+        if unsupported:
+            raise ValueError(f"지원되지 않는 OOD 메소드: {unsupported}. 지원되는 메소드: {SUPPORTED_METHODS}")
 
     from sklearn import metrics
     results = {}
@@ -330,7 +338,7 @@ def get_parser():
     p.add_argument("--dataset",     default="iDigits", type=str)
     p.add_argument("--save",        default="./save", type=str)
     p.add_argument("--ood_dataset", default=None, type=str)
-    p.add_argument("--ood_method", default="ALL", choices=["MSP","ENERGY","KL","GEN","RPO_MSP","PRO_MSP_T","PRO_ENT","PRO_GEN","ALL"])
+    p.add_argument("--ood_method", default="ALL", type=str)
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--develop", action="store_true")
     

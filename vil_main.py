@@ -349,10 +349,10 @@ def get_parser():
     # === OOD method hyper-parameters ===
     p.add_argument('--energy_temperature', type=float, default=1.0, help='Temperature for ENERGY postprocessor')
     # GEN
-    p.add_argument('--gen_gamma', type=float, default=0.1, help='Gamma for GEN / PRO_GEN postprocessor')
-    p.add_argument('--gen_M', type=int, default=100, help='Top-M probabilities used in GEN / PRO_GEN postprocessor')
+    p.add_argument('--gen_gamma', type=float, default=0.01, help='Gamma for GEN / PRO_GEN postprocessor')
+    p.add_argument('--gen_M', type=int, default=3, help='Top-M probabilities used in GEN / PRO_GEN postprocessor')
     # PRO-GEN
-    p.add_argument('--pro_gen_noise_level', type=float, default=1e-4, help='Noise level for PRO_GEN postprocessor')
+    p.add_argument('--pro_gen_noise_level', type=float, default=5e-4, help='Noise level for PRO_GEN postprocessor')
     p.add_argument('--pro_gen_gd_steps', type=int, default=3, help='Gradient descent steps for PRO_GEN postprocessor')
     # PRO-MSP
     p.add_argument('--pro_msp_temperature', type=float, default=1.0, help='Temperature for PRO_MSP postprocessor')

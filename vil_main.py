@@ -12,7 +12,7 @@ from continual_datasets.dataset_utils import set_data_config
 from continual_datasets.dataset_utils import get_ood_dataset
 from continual_datasets.dataset_utils import RandomSampleWrapper
 from utils.acc_heatmap import save_accuracy_heatmap
-from utils import save_anomaly_histogram, save_logits_statistics
+from utils import save_anomaly_histogram, save_logits_statistics, update_ood_hyperparams
 
 
 def seed_everything(seed: int = 42):
@@ -150,86 +150,73 @@ def evaluate_till_now(model, loaders, device, task_id,
     return A_last, A_avg, forgetting
 
 def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
-    # learner._network를 사용해 MSP/ENERGY/KL OOD 지표 계산 (원본 Engine.evaluate_ood와 동일)
+    """OOD 평가를 위한 통합 함수 (adapter 기반)"""
     learner._network.eval()
+    
+    # === New unified OOD evaluation (adapter 기반) ===
     ood_method = args.ood_method.upper()
 
-    def MSP(logits):
-        return F.softmax(logits, dim=1).max(dim=1)[0]
-
-    def ENERGY(logits):
-        return torch.logsumexp(logits, dim=1)
-
-    def KL(logits):
-        return F.cross_entropy(logits, torch.ones_like(logits) / logits.shape[-1], reduction='none')
-
     # 1) 데이터셋 크기 맞추기
-    id_size  = len(id_datasets)
-    ood_size = len(ood_dataset)
+    id_size, ood_size = len(id_datasets), len(ood_dataset)
     min_size = min(id_size, ood_size)
     if args.develop:
         min_size = 1000
     if args.verbose:
-        print(f"ID size: {id_size}, OOD size: {ood_size}, using {min_size} samples each")
+        print(f"ID dataset size: {id_size}, OOD dataset size: {ood_size}. Using {min_size} samples each for evaluation.")
 
-    id_aligned  = RandomSampleWrapper(id_datasets, min_size, args.seed) if id_size > min_size else id_datasets
-    ood_aligned = RandomSampleWrapper(ood_dataset, min_size, args.seed) if ood_size > min_size else ood_dataset
+    id_dataset_aligned = RandomSampleWrapper(id_datasets, min_size, args.seed) if id_size > min_size else id_datasets
+    ood_dataset_aligned = RandomSampleWrapper(ood_dataset, min_size, args.seed) if ood_size > min_size else ood_dataset
 
-    id_loader  = torch.utils.data.DataLoader(id_aligned,  batch_size=args.batch_size,
-                                              shuffle=False, num_workers=args.num_workers)
-    ood_loader = torch.utils.data.DataLoader(ood_aligned, batch_size=args.batch_size,
-                                              shuffle=False, num_workers=args.num_workers)
+    id_loader = torch.utils.data.DataLoader(id_dataset_aligned, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    ood_loader = torch.utils.data.DataLoader(ood_dataset_aligned, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    # 2) 로짓 수집
-    id_logits_list, ood_logits_list = [], []
-    with torch.no_grad():
-        for x, _ in id_loader:
-            x = x.to(device)
-            logits = learner._network(x)["logits"]
-            id_logits_list.append(logits.cpu())
-        for x, _ in ood_loader:
-            x = x.to(device)
-            logits = learner._network(x)["logits"]
-            ood_logits_list.append(logits.cpu())
+    # 2) 평가할 방법 결정
+    from OODdetectors.ood_adapter import SUPPORTED_METHODS, compute_ood_scores
+    methods = SUPPORTED_METHODS if ood_method == "ALL" else [ood_method]
 
-    id_logits  = torch.cat(id_logits_list,  dim=0)
-    ood_logits = torch.cat(ood_logits_list, dim=0)
-
-    # 3) 통계 저장 (선택)
-    if args.save:
-        save_logits_statistics(id_logits, ood_logits, args, task_id or 0)
-
-    # 4) 레이블 및 평가 준비
-    binary_labels = np.concatenate([np.ones(id_logits.shape[0]), np.zeros(ood_logits.shape[0])])
-    methods = ["MSP","ENERGY","KL"] if ood_method=="ALL" else [ood_method]
+    from sklearn import metrics
     results = {}
 
-    for m in methods:
-        if m == "MSP":
-            id_scores, ood_scores = MSP(id_logits), MSP(ood_logits)
-        elif m == "ENERGY":
-            id_scores, ood_scores = ENERGY(id_logits), ENERGY(ood_logits)
-        else:  # KL
-            id_scores, ood_scores = KL(id_logits), KL(ood_logits)
-
-        if args.verbose:
-            save_anomaly_histogram(id_scores.cpu().numpy(),
-                                   ood_scores.cpu().numpy(),
-                                   args, suffix=m.lower(), task_id=task_id)
-
-        all_scores = torch.cat([id_scores, ood_scores], dim=0).cpu().numpy()
-        fpr, tpr, _ = roc_curve(binary_labels, all_scores, drop_intermediate=False)
-        auroc = auc(fpr, tpr)
-        idx95 = np.abs(tpr - 0.95).argmin()
-        fpr95 = fpr[idx95]
-
-        print(f"[{m}] AUROC: {auroc*100:.2f}%, FPR@TPR95: {fpr95*100:.2f}%")
-        results[m] = {"auroc": auroc, "fpr_at_tpr95": fpr95, "scores": all_scores}
+    for method in methods:
+        # 네트워크 모델을 위한 래퍼 클래스 생성
+        class ModelWrapper:
+            def __init__(self, network):
+                self.network = network
+                
+            def __call__(self, x):
+                return self.network(x)["logits"]
+                
+            def eval(self):
+                self.network.eval()
+                
+            def zero_grad(self, set_to_none=True):
+                self.network.zero_grad(set_to_none=set_to_none)
+                
+        wrapped_model = ModelWrapper(learner._network)
         
-        # wandb 로깅 추가
+        id_scores, ood_scores = compute_ood_scores(method, wrapped_model, id_loader, ood_loader, device)
+
+        # 시각화 및 로깅
+        if args.verbose or args.wandb:
+            hist_path = save_anomaly_histogram(id_scores.numpy(), ood_scores.numpy(), args, suffix=method.lower(), task_id=task_id)
+            if args.wandb:
+                import wandb
+                wandb.log({f"Anomaly Histogram TASK {task_id}": wandb.Image(hist_path)})
+
+        binary_labels = np.concatenate([np.ones(id_scores.shape[0]), np.zeros(ood_scores.shape[0])])
+        all_scores = np.concatenate([id_scores.numpy(), ood_scores.numpy()])
+
+        fpr, tpr, _ = metrics.roc_curve(binary_labels, all_scores, drop_intermediate=False)
+        auroc = metrics.auc(fpr, tpr)
+        idx_tpr95 = np.abs(tpr - 0.95).argmin()
+        fpr_at_tpr95 = fpr[idx_tpr95]
+
+        print(f"[{method}]: AUROC {auroc * 100:.2f}% | FPR@TPR95 {fpr_at_tpr95 * 100:.2f}%")
         if args.wandb:
             import wandb
-            wandb.log({f"{m}_AUROC (↑)": auroc * 100, f"{m}_FPR@TPR95 (↓)": fpr95 * 100, "TASK": task_id})
+            wandb.log({f"{method}_AUROC (↑)": auroc * 100, f"{method}_FPR@TPR95 (↓)": fpr_at_tpr95 * 100, "TASK": task_id})
+
+        results[method] = {"auroc": auroc, "fpr_at_tpr95": fpr_at_tpr95, "scores": all_scores}
 
     return results
 
@@ -238,6 +225,9 @@ def vil_train(args):
                for d in args.device]
     args.device = devices
     seed_everything(args.seed)
+    
+    # OOD 하이퍼파라미터 업데이트
+    update_ood_hyperparams(args)
     
     # develop 모드일 경우 tuned_epoch을 1로 설정
     if args.develop:
@@ -340,13 +330,33 @@ def get_parser():
     p.add_argument("--dataset",     default="iDigits", type=str)
     p.add_argument("--save",        default="./save", type=str)
     p.add_argument("--ood_dataset", default=None, type=str)
-    p.add_argument("--ood_method", default="ALL", choices=["MSP","ENERGY","KL","ALL"])
+    p.add_argument("--ood_method", default="ALL", choices=["MSP","ENERGY","KL","GEN","RPO_MSP","PRO_MSP_T","PRO_ENT","PRO_GEN","ALL"])
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--develop", action="store_true")
     
     # wandb 관련 인자 추가
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name")
     p.add_argument("--wandb_project", type=str, default=None, help="Wandb project name")
+
+    # === OOD method hyper-parameters ===
+    p.add_argument('--energy_temperature', type=float, default=1.0, help='Temperature for ENERGY postprocessor')
+    # GEN
+    p.add_argument('--gen_gamma', type=float, default=0.1, help='Gamma for GEN / PRO_GEN postprocessor')
+    p.add_argument('--gen_M', type=int, default=100, help='Top-M probabilities used in GEN / PRO_GEN postprocessor')
+    # PRO-GEN
+    p.add_argument('--pro_gen_noise_level', type=float, default=1e-4, help='Noise level for PRO_GEN postprocessor')
+    p.add_argument('--pro_gen_gd_steps', type=int, default=3, help='Gradient descent steps for PRO_GEN postprocessor')
+    # RPO-MSP
+    p.add_argument('--pro_msp_temperature', type=float, default=1.0, help='Temperature for PRO_MSP postprocessor')
+    p.add_argument('--pro_msp_noise_level', type=float, default=0.003, help='Noise level for PRO_MSP postprocessor')
+    p.add_argument('--pro_msp_gd_steps', type=int, default=1, help='Gradient descent steps for PRO_MSP postprocessor')
+    # PRO-MSP-T
+    p.add_argument('--pro_msp_t_temperature', type=float, default=1.0, help='Temperature for PRO_MSP_T postprocessor')
+    p.add_argument('--pro_msp_t_noise_level', type=float, default=0.003, help='Noise level for PRO_MSP_T postprocessor')
+    p.add_argument('--pro_msp_t_gd_steps', type=int, default=1, help='Gradient descent steps for PRO_MSP_T postprocessor')
+    # PRO-ENT
+    p.add_argument('--pro_ent_noise_level', type=float, default=0.0014, help='Noise level for PRO_ENT postprocessor')
+    p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

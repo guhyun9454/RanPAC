@@ -32,7 +32,7 @@ parameters:
   ood_dataset:
     value: EMNIST
   ood_method:
-    values: [MSP, MAXLOGIT, ENERGY, GEN, PRO_GEN]
+    value: MSP,MAXLOGIT,ENERGY,GEN,PRO_GEN
   gen_gamma:
     value: 0.01
   gen_M:

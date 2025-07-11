@@ -9,6 +9,7 @@ from .pro2_ent_postprocessor import PROv2_ENT_Postprocessor
 from .pro2_tempscale_postprocessor import PROv2_TEMPSCALE_Postprocessor
 from .maxlogit_postprocessor import MaxLogitPostprocessor
 from .base_postprocessor import BasePostprocessor
+from .pseudo_adv_postprocessor import PseudoADVPostprocessor
 
 __all__ = ["SUPPORTED_METHODS", "compute_ood_scores"]
 
@@ -24,6 +25,7 @@ SUPPORTED_METHODS: List[str] = [
     "PRO_ENT",
     "PRO_GEN",
     "MAXLOGIT",
+    "PSEUDO",  # 추가
 ]
 
 _DEFAULT_PARAMS = {
@@ -33,6 +35,7 @@ _DEFAULT_PARAMS = {
     "RPO_MSP": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
     "PRO_ENT": {"noise_level": 0.0014, "gd_steps": 2},
     "PRO_MSP_T": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
+    "PSEUDO": {"epsilon": 0.003},
 }
 
 _POSTPROCESSOR_REGISTRY = {
@@ -44,6 +47,7 @@ _POSTPROCESSOR_REGISTRY = {
     "PRO_ENT": PROv2_ENT_Postprocessor,
     "PRO_MSP_T": PROv2_TEMPSCALE_Postprocessor,
     "MAXLOGIT": MaxLogitPostprocessor,
+    "PSEUDO": PseudoADVPostprocessor,
 }
 
 # ---------------------------------------------------------------------------
@@ -67,6 +71,13 @@ def compute_ood_scores(
 
     processor_cls = _POSTPROCESSOR_REGISTRY[method]
     processor = processor_cls(**params)
+    # Postprocessor 가 학습이 필요하면 setup()을 호출 (id_loader 정보 사용)
+    if hasattr(processor, "setup"):
+        try:
+            processor.setup(model, id_loader, ood_loader, device)
+        except TypeError:
+            # 이전 버전 호환
+            processor.setup(model, id_loader, ood_loader)
 
     def _gather_scores(loader):
         scores = []

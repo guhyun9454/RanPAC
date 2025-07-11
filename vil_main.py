@@ -211,6 +211,65 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
                 import wandb
                 wandb.log({f"Anomaly Histogram TASK {task_id}": wandb.Image(hist_path)})
 
+            # ─── t-SNE 시각화 추가 ───────────────────────────────────────
+            if (args.verbose or args.wandb) and method == "PSEUDO":
+                from utils import save_tsne_plot
+                # ID / OOD logits 수집 (최대 500개씩)
+                def _collect_logits(loader, max_samples=500):
+                    feats = []
+                    count = 0
+                    for x, _ in loader:
+                        x = x.to(device)
+                        with torch.no_grad():
+                            logits = wrapped_model(x)
+                        feats.append(logits.cpu().numpy())
+                        count += x.size(0)
+                        if count >= max_samples:
+                            break
+                    return np.concatenate(feats, axis=0)[:max_samples]
+
+                id_feats = _collect_logits(id_loader)
+                ood_feats = _collect_logits(ood_loader)
+                tsne_path = save_tsne_plot(id_feats, ood_feats, args, suffix=method.lower(), task_id=task_id)
+                if args.wandb:
+                    import wandb
+                    wandb.log({f"tSNE TASK {task_id}": wandb.Image(tsne_path)})
+                    
+                # Pseudo OOD 샘플도 시각화
+                if args.verbose:
+                    # Pseudo OOD 생성 및 시각화
+                    from OODdetectors.pseudo_adv_postprocessor import PseudoADVPostprocessor
+                    pseudo_proc = PseudoADVPostprocessor(
+                        epsilon=args.pseudo_epsilon,
+                        attack_type=args.pseudo_attack_type,
+                        temperature=args.pseudo_temperature
+                    )
+                    
+                    # 몇 개의 ID 샘플에서 pseudo OOD 생성
+                    sample_inputs = []
+                    for x, _ in id_loader:
+                        sample_inputs.append(x[:10].to(device))  # 각 배치에서 10개씩
+                        if len(sample_inputs) >= 5:
+                            break
+                    sample_inputs = torch.cat(sample_inputs, dim=0)[:30]  # 총 30개
+                    
+                    # Pseudo OOD 생성
+                    pseudo_samples = pseudo_proc._generate_pseudo(sample_inputs, wrapped_model.network)
+                    
+                    # 원본과 pseudo의 logits
+                    with torch.no_grad():
+                        orig_logits = wrapped_model(sample_inputs).cpu().numpy()
+                        pseudo_logits = wrapped_model(pseudo_samples).cpu().numpy()
+                    
+                    # Pseudo OOD t-SNE
+                    pseudo_tsne_path = save_tsne_plot(
+                        orig_logits, pseudo_logits, args, 
+                        suffix=f"pseudo_{args.pseudo_attack_type}", 
+                        task_id=task_id
+                    )
+                    if args.wandb:
+                        wandb.log({f"Pseudo OOD tSNE TASK {task_id}": wandb.Image(pseudo_tsne_path)})
+
         binary_labels = np.concatenate([np.ones(id_scores.shape[0]), np.zeros(ood_scores.shape[0])])
         all_scores = np.concatenate([id_scores.numpy(), ood_scores.numpy()])
 
@@ -365,6 +424,28 @@ def get_parser():
     # PRO-ENT
     p.add_argument('--pro_ent_noise_level', type=float, default=0.0014, help='Noise level for PRO_ENT postprocessor')
     p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
+
+    # Pseudo-ADV 파라미터
+    p.add_argument('--pseudo_epsilon', type=float, default=0.003, help='FGSM epsilon for PSEUDO method')
+    p.add_argument('--pseudo_attack_type', type=str, default='fgsm_second', 
+                   choices=['fgsm_second', 'fgsm_random', 'pgd_second', 'fgsm_least_likely', 
+                           'boundary_noise', 'mixup_boundary'],
+                   help='Attack type for generating pseudo OOD samples')
+    p.add_argument('--pseudo_classifier', type=str, default='logistic',
+                   choices=['logistic', 'svm', 'rf'],
+                   help='Classifier type for pseudo OOD detection')
+    p.add_argument('--pseudo_use_features', action='store_true',
+                   help='Use combination features (probs, entropy, energy) instead of just logits')
+    p.add_argument('--pseudo_temperature', type=float, default=1.0,
+                   help='Temperature scaling for pseudo OOD generation')
+    p.add_argument('--pseudo_pgd_steps', type=int, default=5,
+                   help='Number of PGD steps (for pgd_second attack)')
+    p.add_argument('--pseudo_pgd_step_size', type=float, default=0.001,
+                   help='Step size for PGD attack')
+    p.add_argument('--pseudo_random_start', action='store_true',
+                   help='Use random start for PGD attack')
+    p.add_argument('--pseudo_use_confidence_weight', action='store_true',
+                   help='Weight samples by confidence scores during training')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

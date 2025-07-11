@@ -10,6 +10,42 @@ import matplotlib.pyplot as plt
 import os
 import seaborn as sns
 import torch.nn.functional as F
+from sklearn.manifold import TSNE
+
+# ------------------------------------------------------------
+# t-SNE 시각화 유틸
+# ------------------------------------------------------------
+
+
+def save_tsne_plot(id_feats: np.ndarray, ood_feats: np.ndarray, args, suffix=None, task_id=None):
+    """ID / OOD feature (logits or embedding) 배열을 받아 2D t-SNE scatter plot 저장"""
+    task_folder = f"task{task_id+1}" if task_id is not None else "latest"
+    task_path = os.path.join(args.save, task_folder)
+    os.makedirs(task_path, exist_ok=True)
+
+    X = np.concatenate([id_feats, ood_feats], axis=0)
+    y = np.concatenate([np.zeros(len(id_feats)), np.ones(len(ood_feats))], axis=0)  # 0=ID, 1=OOD
+
+    tsne = TSNE(n_components=2, random_state=42, init="pca")
+    X_2d = tsne.fit_transform(X)
+
+    plt.figure(figsize=(8, 8))
+    plt.scatter(X_2d[y == 0, 0], X_2d[y == 0, 1], s=10, c='blue', alpha=0.6, label='ID')
+    plt.scatter(X_2d[y == 1, 0], X_2d[y == 1, 1], s=10, c='red', alpha=0.6, label='OOD')
+    plt.legend()
+    plt.title("t-SNE visualization (ID vs OOD)")
+
+    file_name = "tsne_plot"
+    if task_id is not None:
+        file_name += f"_task{task_id+1}"
+    if suffix:
+        file_name += f"_{suffix}"
+
+    save_path = os.path.join(task_path, f"{file_name}.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"t-SNE plot saved to {save_path}")
+    return save_path
 
 def save_logits_statistics(id_logits, ood_logits, args, task_id):
     """
@@ -195,3 +231,25 @@ def update_ood_hyperparams(args):
     # PRO_ENT
     _oa._DEFAULT_PARAMS.setdefault("PRO_ENT", {})["noise_level"] = args.pro_ent_noise_level
     _oa._DEFAULT_PARAMS["PRO_ENT"]["gd_steps"] = args.pro_ent_gd_steps 
+
+    # PSEUDO ADV
+    if hasattr(args, 'pseudo_epsilon'):
+        _oa._DEFAULT_PARAMS.setdefault("PSEUDO", {})["epsilon"] = args.pseudo_epsilon
+        
+        # 추가 파라미터들
+        if hasattr(args, 'pseudo_attack_type'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["attack_type"] = args.pseudo_attack_type
+        if hasattr(args, 'pseudo_classifier'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["classifier_type"] = args.pseudo_classifier
+        if hasattr(args, 'pseudo_use_features'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["use_feature_combination"] = args.pseudo_use_features
+        if hasattr(args, 'pseudo_temperature'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["temperature"] = args.pseudo_temperature
+        if hasattr(args, 'pseudo_pgd_steps'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["num_steps"] = args.pseudo_pgd_steps
+        if hasattr(args, 'pseudo_pgd_step_size'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["step_size"] = args.pseudo_pgd_step_size
+        if hasattr(args, 'pseudo_random_start'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["random_start"] = args.pseudo_random_start
+        if hasattr(args, 'pseudo_use_confidence_weight'):
+            _oa._DEFAULT_PARAMS["PSEUDO"]["use_confidence_weight"] = args.pseudo_use_confidence_weight 

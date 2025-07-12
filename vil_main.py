@@ -392,7 +392,7 @@ def get_parser():
     p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
 
     # === First-task weight cache ===
-    p.add_argument("--cache_dir", "-c", type=str, default=None, help="Directory to save/load first-task weights (will be created if absent)")
+    p.add_argument("--first_task_weight_dir", "-c", type=str, default=None, help="Directory to save/load first-task weights (will be created if absent)")
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

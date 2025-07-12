@@ -298,12 +298,19 @@ def vil_train(args):
         if tid == 0:
             if args.skip_first_task_training:
                 logging.info(f"Loading cached first-task weights from {first_task_weight_path}")
-                state_dict = torch.load(first_task_weight_path, map_location=devices[0])
-                learner._network.load_state_dict(state_dict, strict=True)
+                ckpt = torch.load(first_task_weight_path, map_location=devices[0])
+                learner._network.load_state_dict(ckpt["state_dict"], strict=True)
+                # Restore random-projection matrix if it exists
+                if ckpt.get("W_rand") is not None:
+                    learner._network.fc.W_rand = ckpt["W_rand"].to(devices[0])
                 learner.dil_init = True  # ensure first-task init flag is set
             else:
                 logging.info(f"Caching first-task weights to {first_task_weight_path}")
-                torch.save(learner._network.state_dict(), first_task_weight_path)
+                ckpt = {
+                    "state_dict": learner._network.state_dict(),
+                    "W_rand": getattr(learner._network.fc, "W_rand", None).cpu()
+                }
+                torch.save(ckpt, first_task_weight_path)
 
         A_last, A_avg, F = evaluate_till_now(
             learner, loaders, devices[0], tid, acc_matrix, args

@@ -8,6 +8,7 @@ from .pro2_msp_postprocessor import PROv2_MSP_Postprocessor
 from .pro2_ent_postprocessor import PROv2_ENT_Postprocessor
 from .pro2_tempscale_postprocessor import PROv2_TEMPSCALE_Postprocessor
 from .maxlogit_postprocessor import MaxLogitPostprocessor
+from .bps_postprocessor import BPSPostprocessor
 from .base_postprocessor import BasePostprocessor
 
 __all__ = ["SUPPORTED_METHODS", "compute_ood_scores"]
@@ -24,6 +25,7 @@ SUPPORTED_METHODS: List[str] = [
     "PRO_ENT",
     "PRO_GEN",
     "MAXLOGIT",
+    "BPS",
 ]
 
 _DEFAULT_PARAMS = {
@@ -33,6 +35,7 @@ _DEFAULT_PARAMS = {
     "RPO_MSP": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
     "PRO_ENT": {"noise_level": 0.0014, "gd_steps": 2},
     "PRO_MSP_T": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
+    "BPS": {"epsilon": 1.0/255.0},
 }
 
 _POSTPROCESSOR_REGISTRY = {
@@ -44,6 +47,7 @@ _POSTPROCESSOR_REGISTRY = {
     "PRO_ENT": PROv2_ENT_Postprocessor,
     "PRO_MSP_T": PROv2_TEMPSCALE_Postprocessor,
     "MAXLOGIT": MaxLogitPostprocessor,
+    "BPS": BPSPostprocessor,
 }
 
 # ---------------------------------------------------------------------------

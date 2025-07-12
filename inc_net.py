@@ -153,22 +153,57 @@ class BaseNet(nn.Module):
         super(BaseNet, self).__init__()
         self.convnet = get_convnet(args, pretrained)
         self.fc = None
+        # Placeholder for DPBL correction modules (one per task after task-0)
+        # Learner will dynamically append modules to this list.
+        from torch.nn import ModuleList  # local import to avoid circular issues
+        self.correction_modules = ModuleList()
 
     @property
     def feature_dim(self):
         return self.convnet.out_dim
 
+    def _apply_corrections(self, feats):
+        """Apply all stored correction modules in a residual manner.
+
+        Args:
+            feats (Tensor): Frozen/uncorrected features.
+
+        Returns:
+            Tensor: Corrected features = feats + Σ_i CM_i(feats)
+        """
+        if len(self.correction_modules) == 0:
+            return feats
+        correction = 0.0
+        for cm in self.correction_modules:
+            # Each CM is expected to be in eval() by default unless training
+            correction = correction + cm(feats)
+        return feats + correction
+
     def forward(self, x):
-        x = self.convnet(x)
-        out = self.fc(x["features"])
-        """
-        {
-            'fmaps': [x_1, x_2, ..., x_n],
-            'features': features
-            'logits': logits
-        }
-        """
-        out.update(x)
+        # First obtain raw features from backbone
+        raw = self.convnet(x)
+
+        # Handle both dict and tensor returns from backbone
+        if isinstance(raw, dict):
+            feats = raw["features"]
+        else:
+            feats = raw
+
+        # Apply DPBL correction(s) if any
+        feats_corr = self._apply_corrections(feats)
+
+        # Classification head
+        logits_dict = self.fc(feats_corr)
+
+        # Ensure output is a dict with at least 'logits'
+        out = logits_dict if isinstance(logits_dict, dict) else {"logits": logits_dict}
+
+        # Preserve convnet auxiliary outputs and attach corrected features
+        if isinstance(raw, dict):
+            raw["features_corr"] = feats_corr  # keep original key intact, add new one
+            out.update(raw)
+        else:
+            out["features_corr"] = feats_corr
 
         return out
 
@@ -190,6 +225,7 @@ class ResNetCosineIncrementalNet(BaseNet):
         del self.fc
         self.fc = fc
 
+
 class SimpleVitNet(BaseNet):
     def __init__(self, args, pretrained):
         super().__init__(args, pretrained)
@@ -206,6 +242,11 @@ class SimpleVitNet(BaseNet):
         self.fc = fc
 
     def forward(self, x):
-        x = self.convnet(x)
-        out = self.fc(x)
-        return out
+        feats = self.convnet(x)
+        feats_corr = self._apply_corrections(feats)
+        out = self.fc(feats_corr)
+        if isinstance(out, dict):
+            out["features_corr"] = feats_corr
+            return out
+        else:
+            return {"logits": out, "features_corr": feats_corr}

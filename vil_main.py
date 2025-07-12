@@ -398,6 +398,12 @@ def get_parser():
     p.add_argument('--pro_ent_noise_level', type=float, default=0.0014, help='Noise level for PRO_ENT postprocessor')
     p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
 
+    # === DPBL (Correction Module) hyper-parameters ===
+    p.add_argument('--cm_epochs', type=int, default=10, help='Epochs for training each CorrectionModule')
+    p.add_argument('--cm_lr', type=float, default=1e-3, help='Learning rate for CorrectionModule optimizer')
+    p.add_argument('--cm_hidden_dim', type=int, default=256, help='Hidden units in CorrectionModule MLP')
+    p.add_argument('--fgsm_eps', type=float, default=1.0/255.0, help='FGSM epsilon for generating boundary samples')
+
     # === First-task weight cache ===
     p.add_argument("--first_task_weight_dir", "-c", type=str, default=None, help="Directory to save/load first-task weights (will be created if absent)")
 

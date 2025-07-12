@@ -10,7 +10,8 @@ from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from inc_net import ResNetCosineIncrementalNet,SimpleVitNet
+from inc_net import ResNetCosineIncrementalNet, SimpleVitNet
+from correction_module import CorrectionModule
 from utils.toolkit import target2onehot, tensor2numpy, accuracy
 
 num_workers = 8
@@ -84,6 +85,75 @@ class Learner(BaseLearner):
             self._network = SimpleVitNet(args, True)
             self._batch_size= args["batch_size"]
         self.args=args
+        # DPBL hyper-parameters (with defaults)
+        self.cm_hidden_dim = self.args.get('cm_hidden_dim', 256)
+        self.cm_lr = self.args.get('cm_lr', 1e-3)
+        self.cm_epochs = self.args.get('cm_epochs', 1)
+        self.boundary_margin = self.args.get('boundary_margin', 0.5)
+        self.fgsm_eps = self.args.get('fgsm_eps', 1.0/255.0)
+
+    # ------------------------------------------------------------ #
+    # DPBL: Train a new correction module for the current task
+    # ------------------------------------------------------------ #
+    def _train_correction_module(self, train_loader):
+        """Train a lightweight CorrectionModule on decision-boundary samples.
+
+        This follows the DPBL procedure described by the user. The backbone and
+        existing correction modules are frozen; only the newly created module
+        is updated.
+        """
+        feature_dim = self._network.feature_dim
+        cm = CorrectionModule(feature_dim, hidden_dim=self.cm_hidden_dim).to(self._device)
+
+        # Freeze all existing parameters
+        for p in self._network.parameters():
+            p.requires_grad = False
+        cm.train()
+        self._network.correction_modules.append(cm)
+
+        optimizer = optim.Adam(cm.parameters(), lr=self.cm_lr)
+
+        for epoch in range(self.cm_epochs):
+            for _, (_, inputs, targets) in enumerate(train_loader):
+                inputs = inputs.to(self._device)
+
+                # 1) Forward to get logits & predictions
+                inputs.requires_grad_(True)
+                out = self._network(inputs)
+                logits = out["logits"]
+
+                # 2) Identify target labels (2nd highest logit) per sample
+                top2 = torch.topk(logits, k=2, dim=1).indices
+                target_labels = top2[:, 1]
+
+                # 3) Generate boundary adversarial sample via FGSM towards target_labels
+                loss_adv = F.cross_entropy(logits, target_labels)
+                self._network.zero_grad(set_to_none=True)
+                if inputs.grad is not None:
+                    inputs.grad.zero_()
+                loss_adv.backward(retain_graph=True)
+                x_p = inputs + self.fgsm_eps * inputs.grad.sign()
+                x_p = torch.clamp(x_p, 0.0, 1.0)
+
+                # 4) Compute OOD scores (energy) for original & perturbed
+                with torch.no_grad():
+                    logits_x = logits.detach()
+                logits_xp = self._network(x_p)["logits"]
+
+                T = 1.0  # temperature for energy
+                energy_x = torch.logsumexp(logits_x / T, dim=1)
+                energy_xp = torch.logsumexp(logits_xp / T, dim=1)
+
+                # 5) Boundary loss — encourage larger gap
+                loss_boundary = F.relu(energy_xp - energy_x + self.boundary_margin).mean()
+
+                optimizer.zero_grad()
+                loss_boundary.backward()
+                optimizer.step()
+
+        # After training, freeze the newly trained correction module
+        for p in cm.parameters():
+            p.requires_grad = False
 
     def after_task(self):
         self._known_classes = self._classes_seen_so_far
@@ -106,7 +176,17 @@ class Learner(BaseLearner):
                 (_,data,label)=batch
                 data=data.cuda()
                 label=label.cuda()
-                embedding = self._network.convnet(data)
+                # Use corrected features produced by the full network (with DPBL modules)
+                feat_dict = self._network(data)
+                if isinstance(feat_dict, dict):
+                    if "features_corr" in feat_dict:
+                        embedding = feat_dict["features_corr"].detach()
+                    elif "features" in feat_dict:
+                        embedding = feat_dict["features"].detach()
+                    else:
+                        embedding = feat_dict["logits"].detach()  # fallback, shouldn't happen
+                else:
+                    embedding = feat_dict.detach()
                 Features_f.append(embedding.cpu())
                 label_list.append(label.cpu())
         Features_f = torch.cat(Features_f, dim=0)
@@ -157,7 +237,10 @@ class Learner(BaseLearner):
             #temporarily remove RP weights
             del self._network.fc
             self._network.fc=None
-        self._network.update_fc(self._classes_seen_so_far) #creates a new head with a new number of classes (if CIL)
+        self._network.update_fc(self._classes_seen_so_far)  # creates a new head with new #classes
+        # Adjust RP head dimensions if random projection matrix is already initialised
+        if self.args.get('use_RP', False) and hasattr(self, 'W_rand'):
+            self._ensure_fc_RP_shape()
         if self.is_dil == False:
             logging.info("Starting CIL Task {}".format(self._cur_task+1))
         logging.info("Learning on classes {}-{}".format(self._known_classes, self._classes_seen_so_far-1))
@@ -242,13 +325,19 @@ class Learner(BaseLearner):
                     self.freeze_backbone()
                 else:
                     if skip_first_task:
-                        logging.info("Skipping SGD training for first task — loading cached weights later.")
+                        logging.info("Skipping SGD training for first task - loading cached weights later.")
 
                 if self.args['use_RP'] and self.dil_init==False:
                     self.setup_RP()
             if self.is_dil and self.dil_init==False:
                 self.dil_init=True
                 self._network.fc.weight.data.fill_(0.0)
+
+            # ---------------- DPBL Phase: train correction module (task>0) ---------------- #
+            if self._cur_task > 0:
+                logging.info("Training DPBL Correction Module for task {}".format(self._cur_task))
+                self._train_correction_module(train_loader)
+
             self.replace_fc(train_loader_for_CPs)
             self.show_num_params()
         
@@ -268,6 +357,27 @@ class Learner(BaseLearner):
             M=self._network.fc.in_features #this M is L in the paper
         self.Q=torch.zeros(M,self.total_classnum)
         self.G=torch.zeros(M,M)
+
+    # Adjust the newly created fc layer to be compatible with random projection.
+    def _ensure_fc_RP_shape(self):
+        """After self._network.update_fc(), reshape fc.weight for RP."""
+        if not self.args.get('use_RP', False):
+            return
+
+        # Reconfigure weight to (classes, M)
+        if self.args['M'] > 0:
+            M = self.args['M']
+            self._network.fc.weight = nn.Parameter(
+                torch.empty(self._network.fc.out_features, M, device=self._device))
+            self._network.fc.reset_parameters()
+            self._network.fc.W_rand = self.W_rand  # keep stored projection matrix
+        else:
+            # M == 0 (decorrelation only)
+            self._network.fc.weight = nn.Parameter(
+                torch.empty(self._network.fc.out_features, self._network.fc.in_features, device=self._device))
+            self._network.fc.reset_parameters()
+            self._network.fc.W_rand = None
+        self._network.fc.use_RP = True
 
     def _init_train(self, train_loader, test_loader, optimizer, scheduler):
         prog_bar = tqdm(range(self.args['tuned_epoch']))

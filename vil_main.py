@@ -190,19 +190,36 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
         class ModelWrapper:
             def __init__(self, network):
                 self.network = network
-                
+
             def __call__(self, x):
                 return self.network(x)["logits"]
-                
+
             def eval(self):
                 self.network.eval()
-                
+
             def zero_grad(self, set_to_none=True):
                 self.network.zero_grad(set_to_none=set_to_none)
-                
+
         wrapped_model = ModelWrapper(learner._network)
-        
-        id_scores, ood_scores = compute_ood_scores(method, wrapped_model, id_loader, ood_loader, device)
+
+        if method == "PSEUDO" and hasattr(learner, "pseudo_processor") and learner.pseudo_processor.trained:
+            # 이미 학습된 processor 사용
+            processor = learner.pseudo_processor
+
+            def _gather_scores(loader):
+                scores = []
+                wrapped_model.eval()
+                for inputs, _ in loader:
+                    inputs = inputs.to(device)
+                    wrapped_model.zero_grad(set_to_none=True)
+                    _, conf = processor.postprocess(wrapped_model, inputs)
+                    scores.append(conf.detach().cpu())
+                return torch.cat(scores, dim=0)
+
+            id_scores = _gather_scores(id_loader)
+            ood_scores = _gather_scores(ood_loader)
+        else:
+            id_scores, ood_scores = compute_ood_scores(method, wrapped_model, id_loader, ood_loader, device)
 
         # 시각화 및 로깅
         if args.verbose or args.wandb:
@@ -305,6 +322,11 @@ def vil_train(args):
         msg = f"[Task {tid+1:2d}] 소요 시간: {task_time:.2f}초 ({task_time/60:.2f}분)"
         logging.info(msg)
 
+        # develop 모드이면 첫 태스크 후 즉시 종료
+        if args.develop:
+            logging.info("개발 모드: 첫 태스크 학습 완료 후 종료합니다.")
+            break
+
     total_time = time.time() - total_start_time
     msg = f"\n전체 훈련 소요 시간: {total_time:.2f}초 ({total_time/60:.2f}분)"
     logging.info(msg)
@@ -365,6 +387,14 @@ def get_parser():
     # PRO-ENT
     p.add_argument('--pro_ent_noise_level', type=float, default=0.0014, help='Noise level for PRO_ENT postprocessor')
     p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
+
+    # === PSEUDO-OOD classifier hyper-parameters ===
+    p.add_argument('--pseudo_eps', type=float, default=0.02, help='FGSM epsilon for pseudo-OOD generation')
+    p.add_argument('--pseudo_max_batches', type=int, default=0, help='Number of train batches used to train pseudo-OOD classifier')
+    p.add_argument('--pseudo_lr', type=float, default=1e-4, help='Learning rate of pseudo-OOD logistic classifier')
+    p.add_argument('--pseudo_epochs', type=int, default=3, help='Training epochs of pseudo-OOD logistic classifier')
+    p.add_argument('--pseudo_hidden_dim', type=int, default=128, help='Hidden dimension for pseudo-OOD classifier MLP')
+    p.add_argument('--pseudo_layers', type=int, default=2, choices=[1,2,3], help='Number of layers (1=linear,2,3) for pseudo-OOD classifier')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

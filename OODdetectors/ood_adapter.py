@@ -9,6 +9,7 @@ from .pro2_ent_postprocessor import PROv2_ENT_Postprocessor
 from .pro2_tempscale_postprocessor import PROv2_TEMPSCALE_Postprocessor
 from .maxlogit_postprocessor import MaxLogitPostprocessor
 from .base_postprocessor import BasePostprocessor
+from .pseudo_postprocessor import PseudoOODPostprocessor
 
 __all__ = ["SUPPORTED_METHODS", "compute_ood_scores"]
 
@@ -24,6 +25,7 @@ SUPPORTED_METHODS: List[str] = [
     "PRO_ENT",
     "PRO_GEN",
     "MAXLOGIT",
+    "PSEUDO",  # 새롭게 추가된 pseudo-OOD 방법
 ]
 
 _DEFAULT_PARAMS = {
@@ -33,6 +35,7 @@ _DEFAULT_PARAMS = {
     "RPO_MSP": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
     "PRO_ENT": {"noise_level": 0.0014, "gd_steps": 2},
     "PRO_MSP_T": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
+    "PSEUDO": {"eps": 0.02, "max_train_batches": 0, "lr": 1e-2, "epochs": 3, "hidden_dim":128, "layers":2},
 }
 
 _POSTPROCESSOR_REGISTRY = {
@@ -44,6 +47,7 @@ _POSTPROCESSOR_REGISTRY = {
     "PRO_ENT": PROv2_ENT_Postprocessor,
     "PRO_MSP_T": PROv2_TEMPSCALE_Postprocessor,
     "MAXLOGIT": MaxLogitPostprocessor,
+    "PSEUDO": PseudoOODPostprocessor,
 }
 
 # ---------------------------------------------------------------------------
@@ -66,7 +70,14 @@ def compute_ood_scores(
     params = _DEFAULT_PARAMS.get(method, {})
 
     processor_cls = _POSTPROCESSOR_REGISTRY[method]
-    processor = processor_cls(**params)
+
+    # PSEUDO 메소드는 id_loader를 사용해 먼저 분류기를 학습해야 하므로, 별도 처리
+    if method == "PSEUDO":
+        processor = processor_cls(**params)
+        # 학습 단계
+        processor.fit(model, id_loader, device)
+    else:
+        processor = processor_cls(**params)
 
     def _gather_scores(loader):
         scores = []

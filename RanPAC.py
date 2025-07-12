@@ -172,6 +172,10 @@ class Learner(BaseLearner):
             print('Multiple GPUs')
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
         self._train(self.train_loader, self.test_loader, self.train_loader_for_CPs)
+
+        # === Pseudo-OOD classifier 학습 ===
+        self.train_pseudo_processor(self._device)
+
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
@@ -290,6 +294,42 @@ class Learner(BaseLearner):
             prog_bar.set_description(info)
 
         logging.info(info)
+        
+    
+
+    # ------------------------------------------------------------------ #
+    # Pseudo-OOD binary classifier 학습 (task-n train time)
+    # ------------------------------------------------------------------ #
+    def train_pseudo_processor(self, device):
+        """현재 task 의 train_loader 기반으로 PseudoOODPostprocessor 학습"""
+        try:
+            from OODdetectors.pseudo_postprocessor import PseudoOODPostprocessor
+            from OODdetectors import ood_adapter as _oa
+        except ImportError:
+            logging.warning("PseudoOODPostprocessor 모듈을 찾을 수 없습니다. 스킵합니다.")
+            return
+
+        # default 하이퍼파라미터 가져오기
+        params = _oa._DEFAULT_PARAMS.get("PSEUDO", {})
+        self.pseudo_processor = PseudoOODPostprocessor(**params)
+
+        class ModelWrapper:
+            def __init__(self, network):
+                self.network = network
+            def __call__(self, x):
+                return self.network(x)["logits"]
+            def eval(self):
+                self.network.eval()
+            def zero_grad(self, set_to_none=True):
+                self.network.zero_grad(set_to_none=set_to_none)
+
+        wrapped_model = ModelWrapper(self._network)
+
+        # learner.train_loader 는 전체 ID 학습 데이터임
+        id_loader = self.train_loader  # already created in incremental_train
+        logging.info("PseudoOODPostprocessor 학습 시작 (ID={} samples)".format(len(id_loader.dataset)))
+        self.pseudo_processor.fit(wrapped_model, id_loader, device)
+        logging.info("PseudoOODPostprocessor 학습 완료")
         
     
 

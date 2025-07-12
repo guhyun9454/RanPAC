@@ -195,3 +195,11 @@ def update_ood_hyperparams(args):
     # PRO_ENT
     _oa._DEFAULT_PARAMS.setdefault("PRO_ENT", {})["noise_level"] = args.pro_ent_noise_level
     _oa._DEFAULT_PARAMS["PRO_ENT"]["gd_steps"] = args.pro_ent_gd_steps 
+ 
+    # PSEUDO
+    _oa._DEFAULT_PARAMS.setdefault("PSEUDO", {})["eps"] = args.pseudo_eps
+    _oa._DEFAULT_PARAMS["PSEUDO"]["max_train_batches"] = args.pseudo_max_batches
+    _oa._DEFAULT_PARAMS["PSEUDO"]["lr"] = args.pseudo_lr
+    _oa._DEFAULT_PARAMS["PSEUDO"]["epochs"] = args.pseudo_epochs
+    _oa._DEFAULT_PARAMS["PSEUDO"]["hidden_dim"] = args.pseudo_hidden_dim
+    _oa._DEFAULT_PARAMS["PSEUDO"]["layers"] = args.pseudo_layers 

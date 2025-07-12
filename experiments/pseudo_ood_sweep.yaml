@@ -1,0 +1,47 @@
+name: PseudoOOD_RanPAC_RandomSweep
+program: vil_main.py
+method: random
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --use_RP
+  - --develop
+  - ${args}
+
+parameters:
+  dataset:
+    value: iDigits
+  num_tasks:
+    value: 20
+  IL_mode:
+    value: vil
+  ood_dataset:
+    value: EMNIST
+  data_path:
+    value: /local_datasets
+  M:
+    value: 10000
+  ood_method:
+    value: MSP,PSEUDO,ENERGY
+
+  pseudo_lr:
+    values: [1e-5, 1e-4, 1e-3, 1e-2]
+  pseudo_epochs:
+    values: [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+
+  pseudo_eps:
+    values: [0.005, 0.01, 0.015, 0.02, 0.025, 0.03]
+  pseudo_hidden_dim:
+    values: [128, 256, 512]
+  pseudo_layers:
+    values: [1, 2, 3]
+  pseudo_max_batches:
+    values: [0, 32, 64, 128, 256]
+
+  seed:
+    value: 0
+  wandb_project:
+    value: PseudoOOD_Sweep
+  wandb_run:
+    value: RanPAC_Pseudo 

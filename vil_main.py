@@ -232,6 +232,20 @@ def vil_train(args):
     devices = [torch.device(f'cuda:{d}') if d >= 0 else torch.device('cpu')
                for d in args.device]
     args.device = devices
+
+    # ------------------------------------------------------------------ #
+    # 1) Determine path for caching first-task weights & whether to skip
+    #    expensive first-task training.
+    # ------------------------------------------------------------------ #
+    os.makedirs(args.first_task_weight_dir, exist_ok=True)
+    first_task_weight_path = os.path.join(
+        args.first_task_weight_dir,
+        f"{args.dataset}_first_task_seed{args.seed}.pth")
+
+    # If the cached weights exist, we will load them later and skip SGD-based
+    # training for task-0. Pass this information to Learner through args.
+    args.skip_first_task_training = os.path.exists(first_task_weight_path)
+
     seed_everything(args.seed)
     
     # OOD 하이퍼파라미터 업데이트
@@ -278,7 +292,18 @@ def vil_train(args):
         learner._known_classes       = 0
         learner._classes_seen_so_far = 0
 
-        learner.incremental_train(dm)      # FULL RanPAC pipeline
+        learner.incremental_train(dm)
+
+        # After incremental_train we either load or save first-task weights
+        if tid == 0:
+            if args.skip_first_task_training:
+                logging.info(f"Loading cached first-task weights from {first_task_weight_path}")
+                state_dict = torch.load(first_task_weight_path, map_location=devices[0])
+                learner._network.load_state_dict(state_dict, strict=True)
+                learner.dil_init = True  # ensure first-task init flag is set
+            else:
+                logging.info(f"Caching first-task weights to {first_task_weight_path}")
+                torch.save(learner._network.state_dict(), first_task_weight_path)
 
         A_last, A_avg, F = evaluate_till_now(
             learner, loaders, devices[0], tid, acc_matrix, args
@@ -365,6 +390,9 @@ def get_parser():
     # PRO-ENT
     p.add_argument('--pro_ent_noise_level', type=float, default=0.0014, help='Noise level for PRO_ENT postprocessor')
     p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
+
+    # === First-task weight cache ===
+    p.add_argument("--cache_dir", "-c", type=str, default=None, help="Directory to save/load first-task weights (will be created if absent)")
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

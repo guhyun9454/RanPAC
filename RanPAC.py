@@ -225,15 +225,25 @@ class Learner(BaseLearner):
             if self._cur_task == 0 and self.dil_init==False:
                 if 'ssf' in self.args['convnet_type']:
                     self.freeze_backbone(is_first_session=True)
-                if self.args["model_name"] != 'ncm':
-                    #this will be a PETL method. Here, 'body_lr' means all parameters
+
+                # ------------------------------------------------------ #
+                # Skip heavy SGD training if instructed by caller.
+                # ------------------------------------------------------ #
+                skip_first_task = self.args.get('skip_first_task_training', False)
+
+                if self.args["model_name"] != 'ncm' and not skip_first_task:
+                    # this will be a PETL method. Here, 'body_lr' means all parameters
                     self.show_num_params()
-                    optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=self.args['body_lr'],weight_decay=self.weight_decay)
-                    scheduler=optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.args['tuned_epoch'], eta_min=self.min_lr)
-                    #train the PETL method for the first task:
-                    logging.info("Starting PETL training on first task using "+self.args["model_name"]+" method")
+                    optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=self.args['body_lr'], weight_decay=self.weight_decay)
+                    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.args['tuned_epoch'], eta_min=self.min_lr)
+                    # train the PETL method for the first task:
+                    logging.info("Starting PETL training on first task using " + self.args["model_name"] + " method")
                     self._init_train(train_loader, test_loader, optimizer, scheduler)
                     self.freeze_backbone()
+                else:
+                    if skip_first_task:
+                        logging.info("Skipping SGD training for first task — loading cached weights later.")
+
                 if self.args['use_RP'] and self.dil_init==False:
                     self.setup_RP()
             if self.is_dil and self.dil_init==False:

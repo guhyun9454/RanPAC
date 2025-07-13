@@ -35,7 +35,7 @@ parameters:
   pseudo_hidden_dim:
     values: [128, 256, 512]
   pseudo_layers:
-    values: [1, 2, 3]
+    values: [0, 1, 2, 3]
   pseudo_max_batches:
     values: [0, 32, 64, 128, 256]
 

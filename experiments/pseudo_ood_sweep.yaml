@@ -6,7 +6,6 @@ command:
   - python
   - ${program}
   - --use_RP
-  - --develop
   - ${args}
 
 parameters:

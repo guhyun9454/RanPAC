@@ -24,20 +24,22 @@ parameters:
     value: 10000
   ood_method:
     value: MSP,PSEUDO,ENERGY
-
+  pseudo_lambda:
+    values: [1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3]
   pseudo_lr:
-    values: [1e-5, 1e-4, 1e-3, 1e-2]
+      values: [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1]
   pseudo_epochs:
     values: [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
 
   pseudo_eps:
-    values: [0.005, 0.01, 0.015, 0.02, 0.025, 0.03]
+    values: [0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05]
   pseudo_hidden_dim:
     values: [128, 256, 512]
   pseudo_layers:
     values: [0, 1, 2, 3]
   pseudo_max_batches:
-    values: [0, 32, 64, 128, 256]
+    values: [0, 32, 64, 128, 256, 512]
+
 
   seed:
     value: 0

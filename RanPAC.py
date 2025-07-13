@@ -313,22 +313,10 @@ class Learner(BaseLearner):
         params = _oa._DEFAULT_PARAMS.get("PSEUDO", {})
         self.pseudo_processor = PseudoOODPostprocessor(**params)
 
-        class ModelWrapper:
-            def __init__(self, network):
-                self.network = network
-            def __call__(self, x):
-                return self.network(x)["logits"]
-            def eval(self):
-                self.network.eval()
-            def zero_grad(self, set_to_none=True):
-                self.network.zero_grad(set_to_none=set_to_none)
-
-        wrapped_model = ModelWrapper(self._network)
-
         # learner.train_loader 는 전체 ID 학습 데이터임
         id_loader = self.train_loader  # already created in incremental_train
         logging.info("PseudoOODPostprocessor 학습 시작 (ID={} samples)".format(len(id_loader.dataset)))
-        self.pseudo_processor.fit(wrapped_model, id_loader, device)
+        self.pseudo_processor.fit(self._network, id_loader, device)
         logging.info("PseudoOODPostprocessor 학습 완료")
         
     

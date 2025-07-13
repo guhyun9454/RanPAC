@@ -35,7 +35,7 @@ _DEFAULT_PARAMS = {
     "RPO_MSP": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
     "PRO_ENT": {"noise_level": 0.0014, "gd_steps": 2},
     "PRO_MSP_T": {"temperature": 1.0, "noise_level": 0.003, "gd_steps": 1},
-    "PSEUDO": {"eps": 0.02, "max_train_batches": 0, "lr": 1e-2, "epochs": 3, "hidden_dim":128, "layers":2},
+    "PSEUDO": {"eps": 0.02, "max_train_batches": 0, "lr": 1e-2, "epochs": 3, "hidden_dim":128, "layers":0, "lambda_":1e-3},
 }
 
 _POSTPROCESSOR_REGISTRY = {

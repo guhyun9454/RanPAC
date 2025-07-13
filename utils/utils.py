@@ -202,4 +202,5 @@ def update_ood_hyperparams(args):
     _oa._DEFAULT_PARAMS["PSEUDO"]["lr"] = args.pseudo_lr
     _oa._DEFAULT_PARAMS["PSEUDO"]["epochs"] = args.pseudo_epochs
     _oa._DEFAULT_PARAMS["PSEUDO"]["hidden_dim"] = args.pseudo_hidden_dim
-    _oa._DEFAULT_PARAMS["PSEUDO"]["layers"] = args.pseudo_layers 
+    _oa._DEFAULT_PARAMS["PSEUDO"]["layers"] = args.pseudo_layers
+    _oa._DEFAULT_PARAMS["PSEUDO"]["lambda_"] = args.pseudo_lambda 

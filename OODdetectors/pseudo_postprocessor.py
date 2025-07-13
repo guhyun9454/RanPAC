@@ -14,7 +14,7 @@ class PseudoOODPostprocessor(BasePostprocessor):
 
     def __init__(self, eps: float = 0.02, max_train_batches: int = 0, 
                  lr: float = 1e-2, epochs: int = 3,
-                 hidden_dim: int = 128, layers: int = 2):
+                 hidden_dim: int = 128, layers: int = 0, lambda_: float = 1e-3):
         super().__init__()
         self.eps = eps
         self.max_train_batches = max_train_batches  # 0이면 전체 사용
@@ -22,6 +22,10 @@ class PseudoOODPostprocessor(BasePostprocessor):
         self.epochs = epochs
         self.hidden_dim = hidden_dim
         self.layers = layers
+        self.lambda_ = lambda_
+
+        # random projection matrix (for layers==0). If network has one, we will reuse it.
+        self.W_rand: Optional[torch.Tensor] = None
         self.trained = False
         self.classifier: Optional[nn.Module] = None
 
@@ -76,22 +80,45 @@ class PseudoOODPostprocessor(BasePostprocessor):
         X = torch.cat(feats, dim=0).to(device)
         y = torch.cat(labels, dim=0).to(device).unsqueeze(1).float()
 
-        # MLP 분류기 초기화
-        dims = [X.size(1)]
-        if self.layers >= 2:
-            dims.append(self.hidden_dim)
-        if self.layers == 3:
-            dims.append(self.hidden_dim)
-        dims.append(1)
+        # Build classifier depending on layers
+        if self.layers == 0:
+            # Reuse network's random projection if available; else create
+            if self.W_rand is None:
+                # expect net passed later, here derive from X dim (placeholder)
+                self.W_rand = torch.randn(X.size(1), self.hidden_dim, device=device)
+            def proj(z):
+                return torch.relu(z @ self.W_rand)
+            X_proj = proj(X)
 
-        modules = []
-        for i in range(len(dims)-2):
-            modules.append(nn.Linear(dims[i], dims[i+1]))
-            modules.append(nn.ReLU())
-        modules.append(nn.Linear(dims[-2], dims[-1]))
-        self.classifier = nn.Sequential(*modules).to(device)
+            # decorrelation whitening using Gram matrix (ridge)
+            G = X_proj.t() @ X_proj  # (M,M)
+            lam = self.lambda_ * torch.trace(G) / G.size(0)
+            eigvals, eigvecs = torch.linalg.eigh(G + lam * torch.eye(G.size(0), device=device))
+            inv_sqrt = eigvecs @ torch.diag(torch.rsqrt(eigvals)) @ eigvecs.t()
+            X_whiten = X_proj @ inv_sqrt
 
-        optimizer = torch.optim.SGD(self.classifier.parameters(), lr=self.lr)
+            self.decorr_mat = inv_sqrt  # store for inference
+
+            self.classifier = nn.Linear(self.hidden_dim, 1).to(device)
+            optimizer = torch.optim.SGD(self.classifier.parameters(), lr=self.lr)
+            feature_func = lambda z: torch.relu(z @ self.W_rand) @ self.decorr_mat
+        else:
+            # MLP according to layers
+            dims = [X.size(1)]
+            if self.layers >= 2:
+                dims.append(self.hidden_dim)
+            if self.layers == 3:
+                dims.append(self.hidden_dim)
+            dims.append(1)
+            modules = []
+            for i in range(len(dims)-2):
+                modules.append(nn.Linear(dims[i], dims[i+1]))
+                modules.append(nn.ReLU())
+            modules.append(nn.Linear(dims[-2], dims[-1]))
+            self.classifier = nn.Sequential(*modules).to(device)
+            optimizer = torch.optim.SGD(self.classifier.parameters(), lr=self.lr)
+            feature_func = lambda z: z  # identity
+
         for ep in range(self.epochs):
             permutation = torch.randperm(X.size(0))
             epoch_loss, cnt = 0.0, 0
@@ -99,7 +126,11 @@ class PseudoOODPostprocessor(BasePostprocessor):
                 idx = permutation[i:i+256]
                 batch_x = X[idx]
                 batch_y = y[idx]
-                logits_bin = self.classifier(batch_x)
+                if self.layers == 0:
+                    bx = feature_func(batch_x)
+                else:
+                    bx = batch_x
+                logits_bin = self.classifier(bx)
                 loss = F.binary_cross_entropy_with_logits(logits_bin, batch_y)
                 optimizer.zero_grad()
                 loss.backward()
@@ -114,9 +145,27 @@ class PseudoOODPostprocessor(BasePostprocessor):
 
     @torch.no_grad()
     def postprocess(self, net: nn.Module, data: Any):
-        """logit → 선형 분류기 sigmoid → anomaly score (확률이 높을수록 OOD)"""
+        """네트워크 convnet feature → RP(+ReLU) → decorrelation → sigmoid(score)"""
         assert self.trained and self.classifier is not None, "PseudoOODPostprocessor: fit() must be called before postprocess()"
-        logits = net(data)
-        conf = torch.sigmoid(self.classifier(logits)).squeeze(1)
-        pred = logits.argmax(dim=1)
+
+        # Extract base features from convnet
+        with torch.no_grad():
+            feats_dict = net.convnet(data)
+            feats = feats_dict["features"] if isinstance(feats_dict, dict) else feats_dict
+
+        if self.layers == 0:
+            # Use RP matrix from network if present and not yet cached
+            if self.W_rand is None and hasattr(net, 'fc') and getattr(net.fc, 'use_RP', False) and hasattr(net.fc, 'W_rand') and net.fc.W_rand is not None:
+                self.W_rand = net.fc.W_rand.detach()
+            if self.W_rand is None:
+                self.W_rand = torch.randn(feats.size(1), self.hidden_dim, device=feats.device)
+
+            feats_rp = torch.relu(feats @ self.W_rand)
+            feats_rp = feats_rp @ self.decorr_mat.to(feats_rp.device)
+            conf = torch.sigmoid(self.classifier(feats_rp)).squeeze(1)
+        else:
+            conf = torch.sigmoid(self.classifier(feats)).squeeze(1)
+        # prediction used for bookkeeping; use network final logits argmax
+        with torch.no_grad():
+            pred = net(data)["logits"].argmax(dim=1)
         return pred, conf 

@@ -208,11 +208,11 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
 
             def _gather_scores(loader):
                 scores = []
-                wrapped_model.eval()
+                learner._network.eval()
                 for inputs, _ in loader:
                     inputs = inputs.to(device)
-                    wrapped_model.zero_grad(set_to_none=True)
-                    _, conf = processor.postprocess(wrapped_model, inputs)
+                    learner._network.zero_grad(set_to_none=True)
+                    _, conf = processor.postprocess(learner._network, inputs)
                     scores.append(conf.detach().cpu())
                 return torch.cat(scores, dim=0)
 
@@ -393,8 +393,9 @@ def get_parser():
     p.add_argument('--pseudo_max_batches', type=int, default=0, help='Number of train batches used to train pseudo-OOD classifier')
     p.add_argument('--pseudo_lr', type=float, default=1e-4, help='Learning rate of pseudo-OOD logistic classifier')
     p.add_argument('--pseudo_epochs', type=int, default=3, help='Training epochs of pseudo-OOD logistic classifier')
-    p.add_argument('--pseudo_hidden_dim', type=int, default=128, help='Hidden dimension for pseudo-OOD classifier MLP')
-    p.add_argument('--pseudo_layers', type=int, default=2, choices=[1,2,3], help='Number of layers (1=linear,2,3) for pseudo-OOD classifier')
+    p.add_argument('--pseudo_hidden_dim', type=int, default=128, help='Hidden dimension for pseudo-OOD classifier MLP / RP output size')
+    p.add_argument('--pseudo_layers', type=int, default=0, choices=[0,1,2,3], help='Number of layers: 0=random projection, 1=linear, 2, 3 hidden layers')
+    p.add_argument('--pseudo_lambda', type=float, default=1e-3, help='Ridge regularization lambda for decorrelation whitening when pseudo_layers=0')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

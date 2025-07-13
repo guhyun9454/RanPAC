@@ -74,8 +74,9 @@ class PseudoOODPostprocessor(BasePostprocessor):
                 feats_ood = feats_ood_dict["features"] if isinstance(feats_ood_dict, dict) else feats_ood_dict
 
             feats.append(torch.cat([feats_id, feats_ood], dim=0).cpu())
-            id_label = torch.zeros(feats_id.size(0))
-            ood_label = torch.ones(feats_ood.size(0))
+            # NOTE: ID=1, OOD=0 로 레이블을 뒤집어 다른 postprocessor 와 동일하게 conf 값이 높을수록 ID 임을 의미하도록 수정
+            id_label = torch.ones(feats_id.size(0))
+            ood_label = torch.zeros(feats_ood.size(0))
             labels.append(torch.cat([id_label, ood_label], dim=0))
 
             processed_batches += 1

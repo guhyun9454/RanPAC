@@ -63,18 +63,19 @@ class PseudoOODPostprocessor(BasePostprocessor):
                 inputs = batch[0]
 
             inputs = inputs.to(device)
-            # 원본 logits (ID)
+            # 원본 conv features (ID)
             with torch.no_grad():
-                out_id = net(inputs)
-                logits_id = out_id["logits"] if isinstance(out_id, dict) else out_id
+                feats_id_dict = net.convnet(inputs)
+                feats_id = feats_id_dict["features"] if isinstance(feats_id_dict, dict) else feats_id_dict
             # pseudo-OOD logits
             inputs_adv = self._generate_pseudo(net, inputs)
             with torch.no_grad():
-                out_ood = net(inputs_adv)
-                logits_ood = out_ood["logits"] if isinstance(out_ood, dict) else out_ood
-            feats.append(torch.cat([logits_id, logits_ood], dim=0).cpu())
-            id_label = torch.zeros(logits_id.size(0))
-            ood_label = torch.ones(logits_ood.size(0))
+                feats_ood_dict = net.convnet(inputs_adv)
+                feats_ood = feats_ood_dict["features"] if isinstance(feats_ood_dict, dict) else feats_ood_dict
+
+            feats.append(torch.cat([feats_id, feats_ood], dim=0).cpu())
+            id_label = torch.zeros(feats_id.size(0))
+            ood_label = torch.ones(feats_ood.size(0))
             labels.append(torch.cat([id_label, ood_label], dim=0))
 
             processed_batches += 1

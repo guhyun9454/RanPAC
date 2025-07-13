@@ -32,7 +32,8 @@ class PseudoOODPostprocessor(BasePostprocessor):
     def _generate_pseudo(self, net: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Targeted FGSM 으로 두 번째로 높은 class 로 공격하여 pseudo-OOD 샘플 생성"""
         x_adv = x.clone().detach().requires_grad_(True)
-        logits = net(x_adv)
+        out = net(x_adv)
+        logits = out["logits"] 
         # 두 번째로 높은 class 선택
         top2 = logits.topk(2, dim=1).indices
         target = top2[:, 1]

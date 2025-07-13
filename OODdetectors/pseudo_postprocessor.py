@@ -65,11 +65,13 @@ class PseudoOODPostprocessor(BasePostprocessor):
             inputs = inputs.to(device)
             # 원본 logits (ID)
             with torch.no_grad():
-                logits_id = net(inputs)
+                out_id = net(inputs)
+                logits_id = out_id["logits"] if isinstance(out_id, dict) else out_id
             # pseudo-OOD logits
             inputs_adv = self._generate_pseudo(net, inputs)
             with torch.no_grad():
-                logits_ood = net(inputs_adv)
+                out_ood = net(inputs_adv)
+                logits_ood = out_ood["logits"] if isinstance(out_ood, dict) else out_ood
             feats.append(torch.cat([logits_id, logits_ood], dim=0).cpu())
             id_label = torch.zeros(logits_id.size(0))
             ood_label = torch.ones(logits_ood.size(0))

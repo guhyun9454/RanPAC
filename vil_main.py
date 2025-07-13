@@ -322,7 +322,7 @@ def vil_train(args):
         msg = f"[Task {tid+1:2d}] 소요 시간: {task_time:.2f}초 ({task_time/60:.2f}분)"
         logging.info(msg)
 
-        if args.develop and tid == 1:
+        if args.develop and tid == 5:
             logging.info("개발 모드: 첫 태스크 학습 완료 후 종료합니다.")
             break
 

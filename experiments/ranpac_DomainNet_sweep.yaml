@@ -14,9 +14,9 @@ metric:
 parameters:
   # --- 기본 설정 ---
   dataset:
-    value: iDigits
+    value: DomainNet
   num_tasks:
-    value: 20
+    value: 30
   data_path:
     value: /local_datasets
   IL_mode:
@@ -24,13 +24,13 @@ parameters:
   
   # --- 모델 및 시드 ---
   seed:
-    values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+    values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   M:
-    value: 5000
+    value: 10000
 
   # --- OOD 설정 ---
   ood_dataset:
-    value: EMNIST
+    value: CORe50
   ood_method:
     value: MSP,MAXLOGIT,ENERGY,GEN,PRO_GEN
   gen_gamma:
@@ -44,6 +44,6 @@ parameters:
     
   # --- WandB 설정 ---
   wandb_project:
-    value: MainTable
+    value: MainTable_DomainNet
   wandb_run:
     value: RanPAC

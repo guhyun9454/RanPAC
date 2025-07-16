@@ -311,13 +311,73 @@ class Learner(BaseLearner):
 
         # default 하이퍼파라미터 가져오기
         params = _oa._DEFAULT_PARAMS.get("PSEUDO", {})
-        self.pseudo_processor = PseudoOODPostprocessor(**params)
+        self.pseudo_processor = PseudoOODPostprocessor(**params, known_class_boundary=self._known_classes)
 
         # learner.train_loader 는 전체 ID 학습 데이터임
         id_loader = self.train_loader  # already created in incremental_train
         logging.info("PseudoOODPostprocessor 학습 시작 (ID={} samples)".format(len(id_loader.dataset)))
         self.pseudo_processor.fit(self._network, id_loader, device)
         logging.info("PseudoOODPostprocessor 학습 완료")
+
+        # -------------------------------------------------------------
+        # 추가 분석 & wandb 로깅 (t-SNE + 이미지 그리드)
+        # -------------------------------------------------------------
+        if hasattr(self, "args") and getattr(self.args, "wandb", False):
+            try:
+                import wandb, torchvision
+                from utils import save_tsne_plot
+                self._network.eval()
+                id_logits_list, ood_logits_list = [], []
+                images_id, images_ood = [], []
+
+                max_points = 1000  # t-SNE 에 사용할 최대 샘플 수
+                gathered = 0
+                for batch in self.train_loader:
+                    # (idx, img, label) or (img, label)
+                    if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                        _, inputs, _ = batch
+                    else:
+                        inputs = batch[0]
+
+                    inputs = inputs.to(device)
+                    with torch.no_grad():
+                        id_logits = self._network(inputs)["logits"].detach().cpu()
+                    adv_inputs = self.pseudo_processor._generate_pseudo(self._network, inputs)
+                    with torch.no_grad():
+                        ood_logits = self._network(adv_inputs)["logits"].detach().cpu()
+
+                    id_logits_list.append(id_logits)
+                    ood_logits_list.append(ood_logits)
+
+                    # 이미지 저장 (처음 32개까지만)
+                    if len(images_ood) < 32:
+                        for idx in range(inputs.size(0)):
+                            if len(images_ood) >= 32:
+                                break
+                            images_id.append(inputs[idx:idx+1].cpu())
+                            images_ood.append(adv_inputs[idx:idx+1].cpu())
+
+                    gathered += id_logits.size(0)
+                    if gathered >= max_points:
+                        break
+
+                id_logits_all = torch.cat(id_logits_list, dim=0)[:max_points]
+                ood_logits_all = torch.cat(ood_logits_list, dim=0)[:max_points]
+
+                # t-SNE 플롯 생성 및 로깅
+                tsne_path = save_tsne_plot(id_logits_all, ood_logits_all, self.args, task_id=self._cur_task)
+                wandb.log({f"tSNE_Logits_Task_{self._cur_task}": wandb.Image(tsne_path), "TASK": self._cur_task})
+
+                # 이미지 그리드 로깅
+                if images_ood:
+                    grid_id = torchvision.utils.make_grid(torch.cat(images_id[:16], dim=0), nrow=8, normalize=True, scale_each=True)
+                    grid_ood = torchvision.utils.make_grid(torch.cat(images_ood[:16], dim=0), nrow=8, normalize=True, scale_each=True)
+                    wandb.log({f"ID_Samples_Task_{self._cur_task}": wandb.Image(grid_id),
+                               f"PseudoOOD_Samples_Task_{self._cur_task}": wandb.Image(grid_ood),
+                               "TASK": self._cur_task})
+            except Exception as e:
+                import traceback, logging
+                logging.warning(f"wandb logging for pseudo-OOD samples failed: {e}\n{traceback.format_exc()}")
         
     
 

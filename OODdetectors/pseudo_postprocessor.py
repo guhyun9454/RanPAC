@@ -14,7 +14,8 @@ class PseudoOODPostprocessor(BasePostprocessor):
 
     def __init__(self, eps: float = 0.02, max_train_batches: int = 0, 
                  lr: float = 1e-2, epochs: int = 3,
-                 hidden_dim: int = 128, layers: int = 0, lambda_: float = 1e-3):
+                 hidden_dim: int = 128, layers: int = 0, lambda_: float = 1e-3,
+                 known_class_boundary: int = 0):
         super().__init__()
         self.eps = eps
         self.max_train_batches = max_train_batches  # 0이면 전체 사용
@@ -24,19 +25,34 @@ class PseudoOODPostprocessor(BasePostprocessor):
         self.layers = layers
         self.lambda_ = lambda_
 
+        # === Meaningful Boundary Generation 관련 ===
+        # 현재 task 이전에 학습된 클래스의 upper-bound index.
+        # (labels < known_class_boundary) 가 과거 task 클래스라고 가정한다.
+        # 첫 task 에서는 0이므로 기존 방식(두 번째 클래스로 공격)을 사용한다.
+        self.known_class_boundary = known_class_boundary
+
         # random projection matrix (for layers==0). If network has one, we will reuse it.
         self.W_rand: Optional[torch.Tensor] = None
         self.trained = False
         self.classifier: Optional[nn.Module] = None
 
     def _generate_pseudo(self, net: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        """Targeted FGSM 으로 두 번째로 높은 class 로 공격하여 pseudo-OOD 샘플 생성"""
+        """Meaningful Boundary Generation: 
+        과거 task 클래스( label < known_class_boundary ) 중에서 가장 점수가 높은 클래스로
+        targeted FGSM 공격을 수행하여 pseudo-OOD 샘플을 생성한다.
+        단, 과거 클래스가 없으면 (첫 task) 기존 방식(두 번째로 높은 class)으로 대체한다."""
         x_adv = x.clone().detach().requires_grad_(True)
         out = net(x_adv)
         logits = out["logits"] 
-        # 두 번째로 높은 class 선택
-        top2 = logits.topk(2, dim=1).indices
-        target = top2[:, 1]
+        if self.known_class_boundary > 0:
+            # 과거 task 클래스들 중 logit이 가장 높은 클래스를 타겟으로 선정
+            past_logits = logits[:, :self.known_class_boundary]
+            target_idx_in_past = past_logits.argmax(dim=1)
+            target = target_idx_in_past  # index 자체가 label (0~known_class_boundary-1)
+        else:
+            # fallback: 두 번째로 높은 class
+            top2 = logits.topk(2, dim=1).indices
+            target = top2[:, 1]
         loss = F.cross_entropy(logits, target)
         net.zero_grad(set_to_none=True)
         loss.backward()

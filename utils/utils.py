@@ -204,3 +204,45 @@ def update_ood_hyperparams(args):
     _oa._DEFAULT_PARAMS["PSEUDO"]["hidden_dim"] = args.pseudo_hidden_dim
     _oa._DEFAULT_PARAMS["PSEUDO"]["layers"] = args.pseudo_layers
     _oa._DEFAULT_PARAMS["PSEUDO"]["lambda_"] = args.pseudo_lambda 
+
+def save_tsne_plot(id_logits, ood_logits, args, task_id=None):
+    """ID / OOD logits를 2D t-SNE 로 투영하여 시각화 후 저장.
+
+    Args:
+        id_logits (torch.Tensor): ID 샘플 logits (N_id, C)
+        ood_logits (torch.Tensor): OOD 샘플 logits (N_ood, C)
+        args: 전체 파라미터 객체 (args.save 경로 사용)
+        task_id (int, optional): 현재 태스크 ID. "latest" 로 저장하려면 None
+    Returns:
+        str: 저장된 이미지 파일 경로
+    """
+    from sklearn.manifold import TSNE
+    import matplotlib.pyplot as plt
+
+    # 데이터 준비
+    X = torch.cat([id_logits, ood_logits], dim=0).cpu().numpy()
+    y = np.concatenate([np.ones(id_logits.shape[0]), np.zeros(ood_logits.shape[0])])
+
+    # t-SNE 계산 (perplexity 는 데이터 개수에 따라 자동 조정)
+    tsne = TSNE(n_components=2, init='pca', random_state=42, learning_rate='auto')
+    X_2d = tsne.fit_transform(X)
+
+    # 저장 경로 준비
+    task_folder = f"task{task_id+1}" if task_id is not None else "latest"
+    task_path = os.path.join(args.save, task_folder)
+    os.makedirs(task_path, exist_ok=True)
+    fname = f"tsne_logits_task{task_id+1 if task_id is not None else 'latest'}.png"
+    save_path = os.path.join(task_path, fname)
+
+    # 플롯
+    plt.figure(figsize=(8, 6))
+    plt.scatter(X_2d[y == 1, 0], X_2d[y == 1, 1], c='red', label='ID', alpha=0.6, s=14)
+    plt.scatter(X_2d[y == 0, 0], X_2d[y == 0, 1], c='blue', label='Pseudo-OOD', alpha=0.6, s=14)
+    title = f"t-SNE of Logits" + (f" - Task {task_id+1}" if task_id is not None else "")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"t-SNE plot saved to {save_path}")
+    return save_path 

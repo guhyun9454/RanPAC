@@ -84,6 +84,8 @@ class Learner(BaseLearner):
             self._network = SimpleVitNet(args, True)
             self._batch_size= args["batch_size"]
         self.args=args
+        # 과거까지 학습한 클래스 인덱스 집합 추적용
+        self.seen_classes = set()
 
     def after_task(self):
         self._known_classes = self._classes_seen_so_far
@@ -163,6 +165,22 @@ class Learner(BaseLearner):
         logging.info("Learning on classes {}-{}".format(self._known_classes, self._classes_seen_so_far-1))
         self.class_increments.append([self._known_classes, self._classes_seen_so_far-1])
         self.train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._classes_seen_so_far),source="train", mode="train", )
+        # === 현재 태스크 데이터에서 클래스 라벨 집합 추출 ===
+        # 현재 태스크 클래스 집합 추출 (현재 도메인)
+        current_classes = set()
+        if hasattr(self.train_dataset, "labels"):
+            current_classes.update(np.unique(self.train_dataset.labels))
+        else:
+            try:
+                current_classes.update(np.unique([self.train_dataset[i][1] for i in range(len(self.train_dataset))]))
+            except Exception:
+                pass
+
+        # self.current_task_classes 속성으로 저장해 이후 참조 가능
+        self.current_task_classes = current_classes
+
+        # 전체 seen_classes 업데이트 (현재 태스크 포함)
+        self.seen_classes.update(current_classes)
         self.train_loader = DataLoader(self.train_dataset, batch_size=self._batch_size, shuffle=True, num_workers=num_workers)
         train_dataset_for_CPs = data_manager.get_dataset(np.arange(self._known_classes, self._classes_seen_so_far),source="train", mode="test", )
         self.train_loader_for_CPs = DataLoader(train_dataset_for_CPs, batch_size=self._batch_size, shuffle=True, num_workers=num_workers)
@@ -311,7 +329,16 @@ class Learner(BaseLearner):
 
         # default 하이퍼파라미터 가져오기
         params = _oa._DEFAULT_PARAMS.get("PSEUDO", {})
-        self.pseudo_processor = PseudoOODPostprocessor(**params, known_class_boundary=self._known_classes)
+
+        # -------------------------------
+        # 과거에 등장했던 클래스 인덱스 집합 계산
+        # -------------------------------
+        if hasattr(self, "seen_classes") and hasattr(self, "current_task_classes"):
+            past_classes = sorted(self.seen_classes - self.current_task_classes)
+        else:
+            past_classes = []
+
+        self.pseudo_processor = PseudoOODPostprocessor(**params, past_classes=past_classes)
 
         # learner.train_loader 는 전체 ID 학습 데이터임
         id_loader = self.train_loader  # already created in incremental_train

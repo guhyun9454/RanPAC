@@ -10,12 +10,16 @@ class PseudoOODPostprocessor(BasePostprocessor):
     network logit 기반의 MLP 분류기를 학습해 ID / OOD 점수를 반환한다.
     학습은 `fit()` 에서 수행되며, `postprocess()` 는 훈련된 분류기의
     sigmoid 확률을 confidence score 로 사용한다.
+
+    past_classes (List[int]): 현재 task 이전에 학습된 클래스 인덱스 집합.
+       Meaningful-Boundary Generation 시, 이들 클래스 중 logit 최댓값을
+       갖는 클래스를 targeted FGSM 의 목표로 사용한다.
     """
 
     def __init__(self, eps: float = 0.02, max_train_batches: int = 0, 
                  lr: float = 1e-2, epochs: int = 3,
                  hidden_dim: int = 128, layers: int = 0, lambda_: float = 1e-3,
-                 known_class_boundary: int = 0):
+                 past_classes: Optional[list] = None):
         super().__init__()
         self.eps = eps
         self.max_train_batches = max_train_batches  # 0이면 전체 사용
@@ -26,10 +30,8 @@ class PseudoOODPostprocessor(BasePostprocessor):
         self.lambda_ = lambda_
 
         # === Meaningful Boundary Generation 관련 ===
-        # 현재 task 이전에 학습된 클래스의 upper-bound index.
-        # (labels < known_class_boundary) 가 과거 task 클래스라고 가정한다.
-        # 첫 task 에서는 0이므로 기존 방식(두 번째 클래스로 공격)을 사용한다.
-        self.known_class_boundary = known_class_boundary
+        # 과거 task 에서 등장했던 클래스 인덱스 리스트 (중복 제거). 비어있으면 첫 태스크.
+        self.past_classes = sorted(set(past_classes)) if past_classes else []
 
         # random projection matrix (for layers==0). If network has one, we will reuse it.
         self.W_rand: Optional[torch.Tensor] = None
@@ -44,11 +46,11 @@ class PseudoOODPostprocessor(BasePostprocessor):
         x_adv = x.clone().detach().requires_grad_(True)
         out = net(x_adv)
         logits = out["logits"] 
-        if self.known_class_boundary > 0:
-            # 과거 task 클래스들 중 logit이 가장 높은 클래스를 타겟으로 선정
-            past_logits = logits[:, :self.known_class_boundary]
-            target_idx_in_past = past_logits.argmax(dim=1)
-            target = target_idx_in_past  # index 자체가 label (0~known_class_boundary-1)
+        if self.past_classes:
+            # 과거 task 클래스들(logit 열) 중 최고 점수 class 선택
+            past_logits = logits[:, self.past_classes]  # (N, |past|)
+            rel_idx = past_logits.argmax(dim=1)  # relative idx w.r.t past_classes list
+            target = torch.tensor([self.past_classes[i] for i in rel_idx.cpu().numpy()], device=logits.device, dtype=torch.long)
         else:
             # fallback: 두 번째로 높은 class
             top2 = logits.topk(2, dim=1).indices

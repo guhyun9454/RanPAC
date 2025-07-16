@@ -376,7 +376,7 @@ class Learner(BaseLearner):
                                f"PseudoOOD_Samples_Task_{self._cur_task}": wandb.Image(grid_ood),
                                "TASK": self._cur_task})
             except Exception as e:
-                import traceback, logging
+                import traceback  # keep traceback for formatting; avoid importing logging to prevent local shadowing
                 logging.warning(f"wandb logging for pseudo-OOD samples failed: {e}\n{traceback.format_exc()}")
         
     

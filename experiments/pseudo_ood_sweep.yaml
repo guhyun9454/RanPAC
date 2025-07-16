@@ -6,6 +6,7 @@ command:
   - python
   - ${program}
   - --use_RP
+  - --develop
   - ${args}
 
 parameters:
@@ -22,7 +23,7 @@ parameters:
   M:
     value: 10000
   ood_method:
-    value: MSP,PSEUDO,ENERGY
+    value: PSEUDO
   pseudo_lambda:
     values: [1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3]
   pseudo_lr:

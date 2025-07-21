@@ -1,9 +1,6 @@
 # sweep.yaml
 program: vil_main.py
 method: random
-metric:
-  name: accuracy
-  goal: maximize
 
 command:
   - ${env}
@@ -13,8 +10,6 @@ command:
   - ${args}
 
 parameters:
-  # --- 고정 파라미터 ---
-  # 'use_RP'는 command에서 처리하므로 여기서 제외합니다.
   dataset:
     value: iDigits
   num_tasks:
@@ -35,10 +30,10 @@ parameters:
   ood_dataset:
     values: ["EMNIST", "KMNIST", "QMNIST", "PermutedMNIST", "NotMNIST"]
   ood_cls_feature:
-    values: ["feat", "rp", "decorr", "logits"]
+    values: ["feat", "rp", "decorr"]
   ood_cls_epochs:
-    values: [10,20,30,40,50,100]
+    values: [5,10,20,30,40,50,100,200]
   ood_cls_lr:
-    values: [0.0001, 0.001, 0.005, 0.01, 0.05, 0.1]
+    values: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
   ood_cls_batch_size:
     values: [64, 128, 256]

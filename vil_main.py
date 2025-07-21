@@ -123,14 +123,22 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
         feats = learner._network.convnet(inputs).detach()
         if feature_type == 'rp':
             W_rand = getattr(learner, 'W_rand', None)
-            return F.relu(feats @ W_rand)
+            if W_rand is None:
+                # fallback: try to fetch from the current FC layer (after replace_fc)
+                W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
+            if W_rand is not None:
+                return F.relu(feats @ W_rand)
+            # if W_rand is missing, just return raw feats
+            return feats
         elif feature_type == 'decorr':
             G = getattr(learner, 'G', None)
-            if G is not None and G.shape[0] == feats.shape[1]:
-                eps = 1e-4
-                G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
-                return feats @ G_inv
-            return feats
+            W_rand = getattr(learner, 'W_rand', None)
+            W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
+            feats = F.relu(feats @ W_rand)
+            eps = 1000000
+            G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+            return feats @ G_inv
+
         return feats
 
     # 2) feature dimension 파악

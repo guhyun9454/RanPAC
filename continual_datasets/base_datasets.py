@@ -888,7 +888,12 @@ class KMNIST_RGB(datasets.KMNIST):
         img, target = self.data[index], int(self.targets[index])
 
         # Grayscale ➜ RGB conversion
-        img = Image.fromarray(img.numpy(), mode='L').convert('RGB')
+        if isinstance(img, torch.Tensor):
+            img = img.numpy()
+        if img.ndim == 3 and img.shape[0] == 1:
+            img = img.squeeze(0)
+
+        img = Image.fromarray(img, mode='L').convert('RGB')
 
         if self.transform is not None:
             img = self.transform(img)
@@ -914,13 +919,20 @@ class QMNIST_RGB(datasets.QMNIST):
         self.classes = [i for i in range(10)]
 
     def __getitem__(self, index):
-        img, target = super().__getitem__(index)
 
-        # img is PIL already if transform not None; ensure RGB
-        if isinstance(img, Image.Image):
-            img = img.convert('RGB')
-        else:  # if base returned tensor/array
-            img = Image.fromarray(img.numpy(), mode='L').convert('RGB')
+        # Fetch raw grayscale image (Tensor H×W) and label.
+        img, target = self.data[index], int(self.targets[index])
+
+        # Ensure numpy array for PIL conversion.
+        if isinstance(img, torch.Tensor):
+            img = img.numpy()
+
+        # ``img`` may have shape (1, H, W); squeeze channel dimension if present.
+        if img.ndim == 3 and img.shape[0] == 1:
+            img = img.squeeze(0)
+
+        # Grayscale (mode 'L') → RGB so downstream models receive 3-channel input
+        img = Image.fromarray(img, mode='L').convert('RGB')
 
         if self.transform is not None:
             img = self.transform(img)

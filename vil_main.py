@@ -277,9 +277,10 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 raise ValueError("TASKCLS 평가를 위해서는 task_classifiers 리스트가 필요합니다.")
 
             # feature 기반 score 계산 함수 정의
-            def _gather_taskcls_scores(loader):
+            def _gather_taskcls_scores(loader, label_name):
                 all_scores = []
                 learner._network.eval()
+                clf_max_counter = np.zeros(len(task_classifiers), dtype=int)
                 with torch.no_grad():
                     for inputs, _ in loader:
                         inputs = inputs.to(device)
@@ -290,13 +291,20 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                             cls_out = torch.sigmoid(cls(feats)).squeeze()
                             probs.append(cls_out)
                         probs = torch.stack(probs, dim=0)  # (num_cls, batch)
-                        max_ood_prob = probs.max(dim=0).values  # (batch,)
+                        max_ood_prob, max_idx = probs.max(dim=0)  # (batch,)
+                        clf_max_counter += torch.bincount(max_idx.cpu(), minlength=len(task_classifiers)).numpy()
                         conf = 1.0 - max_ood_prob             # ID confidence
                         all_scores.append(conf.cpu())
+                # wandb 로깅: classifier별 max 선택된 횟수
+                if args.wandb:
+                    import wandb
+                    data = [[i, int(clf_max_counter[i])] for i in range(len(task_classifiers))]
+                    table = wandb.Table(data=data, columns=["classifier", f"{label_name}_count"])
+                    wandb.log({f"TASKCLS_{label_name}_max_counts/Task{task_id}": table, "TASK": task_id})
                 return torch.cat(all_scores, dim=0)
 
-            id_scores  = _gather_taskcls_scores(id_loader)
-            ood_scores = _gather_taskcls_scores(ood_loader)
+            id_scores  = _gather_taskcls_scores(id_loader, "ID")
+            ood_scores = _gather_taskcls_scores(ood_loader, "OOD")
         else:
             # 네트워크 모델을 위한 래퍼 클래스 생성
             class ModelWrapper:

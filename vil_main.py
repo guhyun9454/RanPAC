@@ -111,10 +111,32 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
         num_workers=args.num_workers,
     )
 
+    # ------------------------------------------------------------
+    # feature extraction helper
+    # ------------------------------------------------------------
+    feature_type = args.ood_cls_feature.lower()
+
+    def extract_feats(inputs):
+        """Return feature tensor according to feature_type."""
+        if feature_type == 'logits':
+            return learner._network(inputs)["logits"].detach()
+        feats = learner._network.convnet(inputs).detach()
+        if feature_type == 'rp':
+            W_rand = getattr(learner, 'W_rand', None)
+            return F.relu(feats @ W_rand)
+        elif feature_type == 'decorr':
+            G = getattr(learner, 'G', None)
+            if G is not None and G.shape[0] == feats.shape[1]:
+                eps = 1e-4
+                G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+                return feats @ G_inv
+            return feats
+        return feats
+
     # 2) feature dimension 파악
     with torch.no_grad():
         sample_x, _ = combined_dataset[0]
-        feat_dim = learner._network.convnet(sample_x.unsqueeze(0).to(device)).shape[1]
+        feat_dim = extract_feats(sample_x.unsqueeze(0).to(device)).shape[1]
 
     # 3) classifier 정의 (simple logistic regression)
     classifier = torch.nn.Linear(feat_dim, 1).to(device)
@@ -130,7 +152,7 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
             labels = labels.float().to(device)
 
             with torch.no_grad():  # convnet은 고정
-                feats = learner._network.convnet(imgs).detach()
+                feats = extract_feats(imgs)
 
             logits = classifier(feats).squeeze()
             loss = criterion(logits, labels)
@@ -277,6 +299,29 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 raise ValueError("TASKCLS 평가를 위해서는 task_classifiers 리스트가 필요합니다.")
 
             # feature 기반 score 계산 함수 정의
+            feature_type = args.ood_cls_feature.lower()
+
+            def extract_feats(inputs):
+                if feature_type == 'logits':
+                    return learner._network(inputs)["logits"].detach()
+                feats = learner._network.convnet(inputs).detach()
+                if feature_type == 'rp':
+                    W_rand = getattr(learner, 'W_rand', None)
+                    if W_rand is None:
+                        W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
+                    if W_rand is not None:
+                        return F.relu(feats @ W_rand)
+                elif feature_type == 'decorr':
+                    G = getattr(learner, 'G', None)
+                    if G is not None and G.shape[0] == feats.shape[1]:
+                        eps = 1e-4
+                        try:
+                            G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+                            return feats @ G_inv
+                        except RuntimeError:
+                            pass
+                return feats
+
             def _gather_taskcls_scores(loader, label_name):
                 all_scores = []
                 learner._network.eval()
@@ -284,7 +329,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 with torch.no_grad():
                     for inputs, _ in loader:
                         inputs = inputs.to(device)
-                        feats = learner._network.convnet(inputs)
+                        feats = extract_feats(inputs)
                         # 각 classifier 의 OOD 확률 계산 후 max
                         probs = []
                         for cls in task_classifiers:
@@ -505,6 +550,8 @@ def get_parser():
     p.add_argument('--ood_cls_epochs', type=int, default=1, help='Epochs to train task-specific OOD classifier')
     p.add_argument('--ood_cls_lr', type=float, default=1e-3, help='Learning rate for task-specific OOD classifier')
     p.add_argument('--ood_cls_batch_size', type=int, default=256, help='Batch size for task-specific OOD classifier')
+    p.add_argument('--ood_cls_feature', type=str, default='feat', choices=['feat','rp','decorr','logits'],
+                   help='Feature type for task OOD classifier: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

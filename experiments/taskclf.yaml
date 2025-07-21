@@ -34,6 +34,8 @@ parameters:
     values: ["EMNIST", "KMNIST", "QMNIST", "PermutedMNIST", "NotMNIST"]
   ood_dataset:
     values: ["EMNIST", "KMNIST", "QMNIST", "PermutedMNIST", "NotMNIST"]
+  ood_cls_feature:
+    values: ["feat", "rp", "decorr", "logits"]
   ood_cls_epochs:
     values: [10,20,30,40,50,100]
   ood_cls_lr:

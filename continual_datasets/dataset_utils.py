@@ -50,9 +50,50 @@ def get_dataset(dataset, transform_train, transform_val, mode, args):
         dataset_train = SynDigit(args.data_path, train=True, download=True, transform=transform_train)
         dataset_val = SynDigit(args.data_path, train=False, download=True, transform=transform_val)
 
+    elif dataset == 'KMNIST':
+        dataset_train = KMNIST_RGB(args.data_path, train=True, download=True, transform=transform_train)
+        dataset_val = KMNIST_RGB(args.data_path, train=False, download=True, transform=transform_val)
+
+    elif dataset == 'PermutedMNIST':
+        dataset_train = PermutedMNIST(args.data_path, train=True, download=True, transform=transform_train, random_seed=args.seed)
+        dataset_val = PermutedMNIST(args.data_path, train=False, download=True, transform=transform_val, random_seed=args.seed)
+
+    elif dataset == 'NotMNIST':
+        dataset_train = NotMNIST(args.data_path, train=True, download=True, transform=transform_train)
+        dataset_val = NotMNIST(args.data_path, train=False, download=True, transform=transform_val)
+
+    elif dataset == 'QMNIST':
+        # QMNIST는 train/test 분리 시 what 인자를 사용하지 않으면 torchvision이 자동 설정
+        dataset_train = QMNIST_RGB(args.data_path, train=True, download=True, transform=transform_train)
+        dataset_val = QMNIST_RGB(args.data_path, train=False, download=True, transform=transform_val)
+
     elif dataset == 'EMNIST':
         dataset_train = EMNIST_RGB(args.data_path, train=True, download=True, transform=transform_train, num_random_classes=26, split='letters')
         dataset_val = EMNIST_RGB(args.data_path, train=False, download=True, transform=transform_val, num_random_classes=26, split='letters')
+
+    elif dataset == 'Flowers102':
+        dataset_train = Flowers102(args.data_path, split='train', download=True, transform=transform_train)
+        dataset_val = Flowers102(args.data_path, split='val', download=True, transform=transform_val)
+
+    elif dataset == 'StanfordCars':
+        dataset_train = StanfordCars(args.data_path, split='train', download=True, transform=transform_train)
+        dataset_val = StanfordCars(args.data_path, split='test',  download=True, transform=transform_val)
+
+    elif dataset == 'CUB200':
+        dataset_train = CUB200(args.data_path, train=True,  download=True, transform=transform_train)
+        dataset_val = CUB200(args.data_path, train=False, download=True, transform=transform_val)
+
+    elif dataset == 'TinyImagenet':
+        dataset_train = TinyImagenet(args.data_path, train=True,  download=True, transform=transform_train)
+        dataset_val = TinyImagenet(args.data_path, train=False, download=True, transform=transform_val)
+
+    elif dataset == 'Scene67':
+        dataset_train = Scene67(args.data_path, train=True,  download=True, transform=transform_train)
+        dataset_val = Scene67(args.data_path, train=False, download=True, transform=transform_val)
+
+    elif dataset == 'Imagenet_R':
+        dataset_train = Imagenet_R(args.data_path, train=True,  download=True, transform=transform_train)
+        dataset_val = Imagenet_R(args.data_path, train=False, download=True, transform=transform_val)
 
     elif dataset == 'iDigits':
         mnist_train, mnist_val = get_dataset('MNIST', transform_train, transform_val, mode, args)

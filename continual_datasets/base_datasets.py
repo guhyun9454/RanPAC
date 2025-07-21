@@ -4,6 +4,7 @@ import glob
 import string
 import zipfile
 from pathlib import Path
+import tarfile
 from shutil import move, rmtree
 from typing import Any, Tuple, Union
 
@@ -870,3 +871,447 @@ class CLEAR(torch.utils.data.Dataset):
                 extract_archive(test_zip, self.root)
             else:
                 print(f"Test extract directory {test_extract_dir} already exists.")
+
+# ---------------------------------------------------------------------------
+# New: KMNIST & QMNIST RGB wrappers (grayscale ➜ RGB)                         
+# ---------------------------------------------------------------------------
+
+
+class KMNIST_RGB(datasets.KMNIST):
+    """RGB wrapper around torchvision.datasets.KMNIST (10 classes, 28×28 gray)."""
+
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        super().__init__(root, train=train, transform=transform, target_transform=target_transform, download=download)
+        self.classes = [i for i in range(10)]  # digits 0-9
+
+    def __getitem__(self, index):
+        img, target = self.data[index], int(self.targets[index])
+
+        # Grayscale ➜ RGB conversion
+        img = Image.fromarray(img.numpy(), mode='L').convert('RGB')
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
+
+
+class QMNIST_RGB(datasets.QMNIST):
+    """RGB wrapper around torchvision.datasets.QMNIST (digits).
+
+    Args mirror torchvision interface; we simply map to super().__init__.
+    """
+
+    def __init__(self, root, what=None, compat=True, train=True, transform=None,
+                 target_transform=None, download=False):
+        # When 'what' is None, torchvision decides based on 'train'.
+        super().__init__(root=root, what=what, compat=compat, train=train,
+                         transform=transform, target_transform=target_transform, download=download)
+        # QMNIST targets are digits 0-9
+        self.classes = [i for i in range(10)]
+
+    def __getitem__(self, index):
+        img, target = super().__getitem__(index)
+
+        # img is PIL already if transform not None; ensure RGB
+        if isinstance(img, Image.Image):
+            img = img.convert('RGB')
+        else:  # if base returned tensor/array
+            img = Image.fromarray(img.numpy(), mode='L').convert('RGB')
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
+
+# ---------------------------------------------------------------------------
+# Additional dataset wrappers (NotMNIST, PermutedMNIST, Flowers102, etc.)
+# ---------------------------------------------------------------------------
+
+
+class NotMNIST(MNIST_RGB):
+    """NotMNIST dataset (A–J glyphs) converted to RGB."""
+
+    url = 'https://github.com/facebookresearch/Adversarial-Continual-Learning/raw/main/data/notMNIST.zip'
+    filename = 'notMNIST.zip'
+
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.train = train
+
+        zip_path = os.path.join(root, self.filename)
+        if not os.path.isfile(zip_path):
+            if not download:
+                raise RuntimeError('Dataset not found. Use download=True to download it.')
+            download_url(self.url, root, filename=self.filename)
+
+        if not os.path.exists(os.path.join(root, 'notMNIST')):
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                for member in tqdm.tqdm(zf.infolist(), desc=f'Extracting {self.filename}'):
+                    try:
+                        zf.extract(member, root)
+                    except zipfile.error:
+                        pass
+
+        fpath = os.path.join(root, 'notMNIST', 'Train' if train else 'Test')
+
+        X, Y = [], []
+        folders = os.listdir(fpath)
+        for folder in folders:
+            folder_path = os.path.join(fpath, folder)
+            for ims in os.listdir(folder_path):
+                img_path = os.path.join(folder_path, ims)
+                try:
+                    X.append(np.array(Image.open(img_path).convert('RGB')))
+                    Y.append(ord(folder) - 65)  # A–J → 0–9
+                except Exception:
+                    # skip broken
+                    continue
+        self.data = np.array(X)
+        self.targets = Y
+
+    def __getitem__(self, index):
+        img, target = self.data[index], int(self.targets[index])
+        img = Image.fromarray(img)
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+
+
+class PermutedMNIST(datasets.MNIST):
+    """MNIST with a fixed random pixel permutation."""
+
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False, random_seed=42):
+        super().__init__(root, train=train, transform=transform, target_transform=target_transform, download=download)
+        self.random_seed = random_seed
+
+    def __getitem__(self, index):
+        img, target = self.data[index], int(self.targets[index])
+        size = img.size(0)
+        np.random.seed(self.random_seed)
+        perm = np.random.permutation(size * size)
+        img = img.flatten()[perm].reshape(size, size)
+        img = Image.fromarray(img.numpy(), mode='L').convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+
+
+# ----------------------------- ImageNet scale datasets ---------------------
+
+class Flowers102(datasets.Flowers102):
+    """RGB Flowers102 wrapper supporting split argument."""
+
+    def __init__(self, root, split='train', transform=None, target_transform=None, download=False):
+        from scipy.io import loadmat  # optional dependency
+        super().__init__(root, transform=transform, target_transform=target_transform, download=download)
+
+        self._split = verify_str_arg(split, "split", ("train", "val", "test"))
+        base = Path(self.root) / "flowers-102"
+        images_folder = base / "jpg"
+
+        if download:
+            self.download()
+
+        # build index lists
+        set_ids = loadmat(base / self._file_dict["setid"][0], squeeze_me=True)
+        image_ids = set_ids[self._splits_map[self._split]].tolist()
+        labels = loadmat(base / self._file_dict["label"][0], squeeze_me=True)
+        image_id_to_label = dict(enumerate(labels["labels"].tolist(), 1))
+
+        self.targets = []
+        self._image_files = []
+        for image_id in image_ids:
+            self.targets.append(image_id_to_label[image_id] - 1)
+            self._image_files.append(images_folder / f"image_{image_id:05d}.jpg")
+
+    def __len__(self):
+        return len(self._image_files)
+
+    def __getitem__(self, index):
+        img = Image.open(self._image_files[index]).convert('RGB')
+        target = self.targets[index]
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+
+
+class StanfordCars(datasets.StanfordCars):
+    """Stanford Cars dataset wrapper simplified (train/test split)."""
+
+    def __init__(self, root, split='train', transform=None, target_transform=None, download=False):
+        import scipy.io as sio
+        super().__init__(root, transform=transform, target_transform=target_transform, download=download)
+
+        self._split = verify_str_arg(split, "split", ("train", "test"))
+        base = Path(self.root) / "stanford_cars"
+        devkit = base / "devkit"
+
+        self._annotations_mat_path = (
+            base / ("cars_train_annos.mat" if split == 'train' else 'cars_test_annos_withlabels.mat')
+        )
+        self._images_base_path = base / ("cars_train" if split == 'train' else 'cars_test')
+
+        if download:
+            self.download()
+
+        annos = sio.loadmat(self._annotations_mat_path, squeeze_me=True)["annotations"]
+        self._samples = [
+            (str(self._images_base_path / a["fname"]), a["class"] - 1) for a in annos
+        ]
+        self.classes = sio.loadmat(str(devkit / "cars_meta.mat"), squeeze_me=True)["class_names"].tolist()
+
+    def __len__(self):
+        return len(self._samples)
+
+    def __getitem__(self, index):
+        img_path, target = self._samples[index]
+        img = Image.open(img_path).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+
+
+class CUB200(torch.utils.data.Dataset):
+    """CUB-200-2011 dataset (preprocessed into train/test folders)."""
+
+    url = 'https://data.deepai.org/CUB200(2011).zip'
+    filename = 'CUB200(2011).zip'
+
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.train = train
+
+        zip_path = os.path.join(root, self.filename)
+        if not os.path.isfile(zip_path):
+            if not download:
+                raise RuntimeError('Dataset not found. Use download=True to download it')
+            download_url(self.url, root, filename=self.filename)
+
+        if not os.path.exists(os.path.join(root, 'CUB_200_2011')):
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                for member in tqdm.tqdm(zf.infolist(), desc=f'Extracting {self.filename}'):
+                    try:
+                        zf.extract(member, root)
+                    except zipfile.error:
+                        pass
+
+            # inner tar archive
+            tar_path = os.path.join(root, 'CUB_200_2011.tgz')
+            if os.path.exists(tar_path):
+                with tarfile.open(tar_path, 'r') as tf:
+                    for member in tqdm.tqdm(tf.getmembers(), desc='Extracting CUB_200_2011.tgz'):
+                        try:
+                            tf.extract(member, root)
+                        except tarfile.TarError:
+                            pass
+            self._split_into_train_test()
+
+        data_root = os.path.join(root, 'CUB_200_2011', 'train' if train else 'test')
+        self.data = datasets.ImageFolder(data_root, transform=transform)
+
+    def _split_into_train_test(self):
+        train_folder = os.path.join(self.root, 'CUB_200_2011', 'train')
+        test_folder = os.path.join(self.root, 'CUB_200_2011', 'test')
+        os.makedirs(train_folder, exist_ok=True)
+        os.makedirs(test_folder, exist_ok=True)
+
+        images_file = os.path.join(self.root, 'CUB_200_2011', 'images.txt')
+        split_file = os.path.join(self.root, 'CUB_200_2011', 'train_test_split.txt')
+
+        with open(images_file, 'r') as img_f, open(split_file, 'r') as split_f:
+            for img_line, split_line in zip(img_f, split_f):
+                image_path = img_line.strip().split(' ')[-1]
+                is_train = split_line.strip().split(' ')[-1] == '1'
+                class_name = image_path.split('/')[0]
+                src = os.path.join(self.root, 'CUB_200_2011', 'images', image_path)
+                dst_base = train_folder if is_train else test_folder
+                dst_dir = os.path.join(dst_base, class_name)
+                os.makedirs(dst_dir, exist_ok=True)
+                move(src, os.path.join(dst_dir, os.path.basename(image_path)))
+
+
+class TinyImagenet(torch.utils.data.Dataset):
+    """TinyImageNet-200 dataset wrapper (train/test split)."""
+
+    url = 'http://cs231n.stanford.edu/tiny-imagenet-200.zip'
+    filename = 'tiny-imagenet-200.zip'
+
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.train = train
+
+        zip_path = os.path.join(root, self.filename)
+        if not os.path.isfile(zip_path):
+            if not download:
+                raise RuntimeError('Dataset not found. Use download=True to download it')
+            download_url(self.url, root, filename=self.filename)
+
+        if not os.path.exists(os.path.join(root, 'tiny-imagenet-200')):
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                for member in tqdm.tqdm(zf.infolist(), desc=f'Extracting {self.filename}'):
+                    try:
+                        zf.extract(member, root)
+                    except zipfile.error:
+                        pass
+            self._split_val_into_test()
+
+        data_root = os.path.join(root, 'tiny-imagenet-200', 'train' if train else 'test')
+        self.data = datasets.ImageFolder(data_root, transform=transform)
+
+    def _split_val_into_test(self):
+        val_dir = os.path.join(self.root, 'tiny-imagenet-200', 'val')
+        test_dir = os.path.join(self.root, 'tiny-imagenet-200', 'test')
+        os.makedirs(test_dir, exist_ok=True)
+
+        val_dict = {}
+        with open(os.path.join(val_dir, 'val_annotations.txt'), 'r') as f:
+            for line in f.readlines():
+                img, cls = line.split('\t')[:2]
+                val_dict[img] = cls
+
+        images_dir = os.path.join(val_dir, 'images')
+        for img_file in tqdm.tqdm(glob.glob(os.path.join(images_dir, '*')), desc='Moving val images'):
+            img_name = os.path.basename(img_file)
+            cls = val_dict[img_name]
+            dst_cls_dir = os.path.join(test_dir, cls, 'images')
+            os.makedirs(dst_cls_dir, exist_ok=True)
+            move(img_file, os.path.join(dst_cls_dir, img_name))
+
+        rmtree(val_dir)
+
+
+class Scene67(torch.utils.data.Dataset):
+    """MIT Indoor Scene67 dataset."""
+
+    image_url = 'http://groups.csail.mit.edu/vision/LabelMe/NewImages/indoorCVPR_09.tar'
+    train_list_url = 'http://web.mit.edu/torralba/www/TrainImages.txt'
+    test_list_url = 'http://web.mit.edu/torralba/www/TestImages.txt'
+    image_tar = 'indoorCVPR_09.tar'
+    train_txt = 'TrainImages.txt'
+    test_txt = 'TestImages.txt'
+
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.train = train
+
+        # download
+        for url, fname in [
+            (self.image_url, self.image_tar),
+            (self.train_list_url, self.train_txt),
+            (self.test_list_url, self.test_txt),
+        ]:
+            fpath = os.path.join(root, fname)
+            if not os.path.isfile(fpath):
+                if not download:
+                    raise RuntimeError('Dataset not found. Use download=True to download it')
+                download_url(url, root, filename=fname)
+
+        if not os.path.exists(os.path.join(root, 'Scene67')):
+            # extract images tar
+            with tarfile.open(os.path.join(root, self.image_tar), 'r') as tf:
+                for member in tqdm.tqdm(tf.getmembers(), desc='Extracting Scene67'):
+                    try:
+                        tf.extract(member, os.path.join(root, 'Scene67'))
+                    except tarfile.TarError:
+                        pass
+            self._split_train_test()
+
+        data_root = os.path.join(root, 'Scene67', 'train' if train else 'test')
+        self.data = datasets.ImageFolder(data_root, transform=transform)
+
+    def _split_train_test(self):
+        base = os.path.join(self.root, 'Scene67')
+        os.makedirs(os.path.join(base, 'train'), exist_ok=True)
+        os.makedirs(os.path.join(base, 'test'), exist_ok=True)
+        with open(os.path.join(self.root, self.train_txt), 'r') as f:
+            for line in f:
+                line = line.strip()
+                src = os.path.join(base, 'Images', line)
+                dst = os.path.join(base, 'train', line)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                move(src, dst)
+        with open(os.path.join(self.root, self.test_txt), 'r') as f:
+            for line in f:
+                line = line.strip()
+                src = os.path.join(base, 'Images', line)
+                dst = os.path.join(base, 'test', line)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                move(src, dst)
+
+
+class Imagenet_R(torch.utils.data.Dataset):
+    """ImageNet-Renditions dataset (automatically split 80/20)."""
+
+    url = 'https://people.eecs.berkeley.edu/~hendrycks/imagenet-r.tar'
+    filename = 'imagenet-r.tar'
+
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.train = train
+
+        tar_path = os.path.join(root, self.filename)
+        if not os.path.isfile(tar_path):
+            if not download:
+                raise RuntimeError('Dataset not found. Use download=True to download it')
+            download_url(self.url, root, filename=self.filename)
+
+        dataset_root = os.path.join(root, 'imagenet-r')
+        if not os.path.exists(dataset_root):
+            with tarfile.open(tar_path, 'r') as tf:
+                for member in tqdm.tqdm(tf.getmembers(), desc='Extracting ImageNet-R'):
+                    try:
+                        tf.extract(member, root)
+                    except tarfile.TarError:
+                        pass
+
+        # if not split yet, create train / test split (80/20)
+        if not (os.path.exists(os.path.join(dataset_root, 'train')) and os.path.exists(os.path.join(dataset_root, 'test'))):
+            full_dataset = datasets.ImageFolder(dataset_root, transform=transform)
+            train_size = int(0.8 * len(full_dataset))
+            val_size = len(full_dataset) - train_size
+            train_subset, val_subset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+
+            # save paths
+            train_paths = [full_dataset.imgs[i][0] for i in train_subset.indices]
+            val_paths = [full_dataset.imgs[i][0] for i in val_subset.indices]
+
+            # reorganize folder structure
+            for split_name, paths in [('train', train_paths), ('test', val_paths)]:
+                for path in paths:
+                    cls = path.split('/')[-2]
+                    dst_dir = os.path.join(dataset_root, split_name, cls)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    move(path, os.path.join(dst_dir, os.path.basename(path)))
+
+            # remove original class folders now empty
+            for cls_dir in glob.glob(os.path.join(dataset_root, '*')):
+                if os.path.isdir(cls_dir) and cls_dir.split('/')[-1] not in ['train', 'test']:
+                    rmtree(cls_dir)
+
+        data_root = os.path.join(dataset_root, 'train' if train else 'test')
+        self.data = datasets.ImageFolder(data_root, transform=transform)

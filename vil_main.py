@@ -312,22 +312,29 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
             def extract_feats(inputs):
                 if feature_type == 'logits':
                     return learner._network(inputs)["logits"].detach()
-                feats = learner._network.convnet(inputs).detach()
-                if feature_type == 'rp':
+
+                # (2) Backbone features
+                feats = learner._network.convnet(inputs).detach()  # (B, D)
+
+                # (3) Random projection (shared by 'rp' and first step of 'decorr')
+                if feature_type in {'rp', 'decorr'}:
                     W_rand = getattr(learner, 'W_rand', None)
                     if W_rand is None:
                         W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
                     if W_rand is not None:
-                        return F.relu(feats @ W_rand)
-                elif feature_type == 'decorr':
+                        feats = F.relu(feats @ W_rand)             # (B, M)
+                    if feature_type == 'rp':
+                        return feats
+
+                # (4) Decorrelation step (applied after RP)
+                if feature_type == 'decorr':
                     G = getattr(learner, 'G', None)
-                    if G is not None and G.shape[0] == feats.shape[1]:
-                        eps = 1e-4
-                        try:
-                            G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
-                            return feats @ G_inv
-                        except RuntimeError:
-                            pass
+                    eps = 1000000
+                    G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+                    feats = feats @ G_inv
+                    return feats
+
+                # Default: raw features
                 return feats
 
             def _gather_taskcls_scores(loader, label_name):

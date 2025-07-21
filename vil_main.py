@@ -162,7 +162,7 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
             optimizer.step()
 
             epoch_loss += loss.item()
-
+        print(f"Epoch {epoch+1}/{args.ood_cls_epochs} loss: {epoch_loss/len(loader):.4f}")
     classifier.eval()
     return classifier
 

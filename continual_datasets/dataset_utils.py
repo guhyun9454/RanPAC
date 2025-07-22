@@ -63,7 +63,6 @@ def get_dataset(dataset, transform_train, transform_val, mode, args):
         dataset_val = NotMNIST(args.data_path, train=False, download=True, transform=transform_val)
 
     elif dataset == 'QMNIST':
-        # QMNIST는 train/test 분리 시 what 인자를 사용하지 않으면 torchvision이 자동 설정
         dataset_train = QMNIST_RGB(args.data_path, train=True, download=True, transform=transform_train)
         dataset_val = QMNIST_RGB(args.data_path, train=False, download=True, transform=transform_val)
 
@@ -80,20 +79,20 @@ def get_dataset(dataset, transform_train, transform_val, mode, args):
         dataset_val = StanfordCars(args.data_path, split='test',  download=True, transform=transform_val)
 
     elif dataset == 'CUB200':
-        dataset_train = CUB200(args.data_path, train=True,  download=True, transform=transform_train)
-        dataset_val = CUB200(args.data_path, train=False, download=True, transform=transform_val)
+        dataset_train = CUB200(args.data_path, train=True,  download=True, transform=transform_train).data
+        dataset_val = CUB200(args.data_path, train=False, download=True, transform=transform_val).data
 
     elif dataset == 'TinyImagenet':
-        dataset_train = TinyImagenet(args.data_path, train=True,  download=True, transform=transform_train)
-        dataset_val = TinyImagenet(args.data_path, train=False, download=True, transform=transform_val)
+        dataset_train = TinyImagenet(args.data_path, train=True,  download=True, transform=transform_train).data
+        dataset_val = TinyImagenet(args.data_path, train=False, download=True, transform=transform_val).data
 
     elif dataset == 'Scene67':
-        dataset_train = Scene67(args.data_path, train=True,  download=True, transform=transform_train)
-        dataset_val = Scene67(args.data_path, train=False, download=True, transform=transform_val)
+        dataset_train = Scene67(args.data_path, train=True,  download=True, transform=transform_train).data
+        dataset_val = Scene67(args.data_path, train=False, download=True, transform=transform_val).data
 
     elif dataset == 'Imagenet_R':
-        dataset_train = Imagenet_R(args.data_path, train=True,  download=True, transform=transform_train)
-        dataset_val = Imagenet_R(args.data_path, train=False, download=True, transform=transform_val)
+        dataset_train = Imagenet_R(args.data_path, train=True,  download=True, transform=transform_train).data
+        dataset_val = Imagenet_R(args.data_path, train=False, download=True, transform=transform_val).data
 
     elif dataset == 'iDigits':
         mnist_train, mnist_val = get_dataset('MNIST', transform_train, transform_val, mode, args)

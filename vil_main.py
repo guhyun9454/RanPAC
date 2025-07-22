@@ -346,14 +346,15 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                         inputs = inputs.to(device)
                         feats = extract_feats(inputs)
                         # 각 classifier 의 OOD 확률 계산 후 max
-                        probs = []
+                        scores = []
                         for cls in task_classifiers:
-                            cls_out = torch.sigmoid(cls(feats)).squeeze()
-                            probs.append(cls_out)
-                        probs = torch.stack(probs, dim=0)  # (num_cls, batch)
-                        max_ood_prob, max_idx = probs.max(dim=0)  # (batch,)
+                            logit = cls(feats).squeeze()
+                            score = torch.sigmoid(logit) if args.ood_score_type == "sigmoid" else logit
+                            scores.append(score)
+                        scores = torch.stack(scores, dim=0)  # (num_cls, batch)
+                        max_ood_score, max_idx = scores.max(dim=0)  # (batch,)
                         clf_max_counter += torch.bincount(max_idx.cpu(), minlength=len(task_classifiers)).numpy()
-                        conf = 1.0 - max_ood_prob             # ID confidence
+                        conf = 1.0 - max_ood_score if args.ood_score_type == "sigmoid" else -max_ood_score  # ID confidence
                         all_scores.append(conf.cpu())
                 # wandb 로깅: classifier별 max 선택된 횟수
                 if args.wandb:
@@ -567,6 +568,8 @@ def get_parser():
     p.add_argument('--ood_cls_batch_size', type=int, default=256, help='Batch size for task-specific OOD classifier')
     p.add_argument('--ood_cls_feature', type=str, default='feat', choices=['feat','rp','decorr','logits'],
                    help='Feature type for task OOD classifier: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
+    p.add_argument('--ood_score_type', type=str, default='sigmoid', choices=['sigmoid','logit'],
+                   help='Score type for TASKCLS OOD confidence: use sigmoid probability or raw logit')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

@@ -37,6 +37,8 @@ parameters:
     values: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
   ood_cls_batch_size:
     values: [64, 128, 256]
+  ood_score_type:
+    values: ["sigmoid", "logit"]
   wandb_project:
     value: 0722_taskclf
   wandb_run:

@@ -438,8 +438,30 @@ def vil_train(args):
         loaders[-1]['ood'] = get_ood_dataset(args.ood_dataset, args)
 
     # OOD 학습용 데이터셋 준비 (optional)
+    # --ood_train_dataset 인자에 여러 개의 데이터셋을 콤마(,)로 나열하면
+    # 각 데이터셋을 개별적으로 로드한 뒤 ConcatDataset 으로 합칩니다.
     if args.ood_train_dataset:
-        ood_train_dataset = get_ood_dataset(args.ood_train_dataset, args)
+        dataset_names = [name.strip() for name in args.ood_train_dataset.split(',') if name.strip()]
+        if len(dataset_names) == 1:
+            ood_train_dataset = get_ood_dataset(dataset_names[0], args)
+        else:
+            # 여러 데이터셋을 로드한 뒤 하나로 결합하되, 각 데이터셋에서 동일한 개수의 샘플을 사용하도록
+            # 가장 작은 데이터셋 크기에 맞추어 RandomSampleWrapper 로 균등 샘플링합니다.
+            loaded_datasets = [get_ood_dataset(n, args) for n in dataset_names]
+
+            # 가장 작은 데이터셋 크기 산출
+            min_len = min(len(ds) for ds in loaded_datasets)
+            balanced_datasets = []
+            for idx, ds in enumerate(loaded_datasets):
+                if len(ds) > min_len:
+                    balanced_datasets.append(RandomSampleWrapper(ds, min_len, args.seed + idx))
+                else:
+                    balanced_datasets.append(ds)
+
+            ood_train_dataset = ConcatDataset(balanced_datasets)
+            logging.info(
+                f"Balanced concat OOD train datasets: {dataset_names} | per-dataset samples: {min_len} | total: {len(ood_train_dataset)}"
+            )
     else:
         ood_train_dataset = None
 
@@ -562,7 +584,8 @@ def get_parser():
     p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
 
     # === Task-specific OOD classifier 관련 인자 ===
-    p.add_argument('--ood_train_dataset', type=str, default=None, help='OOD dataset used for training task-specific classifiers')
+    p.add_argument('--ood_train_dataset', type=str, default=None,
+                   help='Comma-separated OOD dataset list used for training task-specific classifiers (e.g., "EMNIST,KMNIST")')
     p.add_argument('--ood_cls_epochs', type=int, default=1, help='Epochs to train task-specific OOD classifier')
     p.add_argument('--ood_cls_lr', type=float, default=1e-3, help='Learning rate for task-specific OOD classifier')
     p.add_argument('--ood_cls_batch_size', type=int, default=256, help='Batch size for task-specific OOD classifier')

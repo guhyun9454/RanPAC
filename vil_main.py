@@ -340,7 +340,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
             def _gather_taskcls_scores(loader, label_name):
                 all_scores = []
                 learner._network.eval()
-                clf_max_counter = np.zeros(len(task_classifiers), dtype=int)
+                # clf_max_counter = np.zeros(len(task_classifiers), dtype=int)
                 with torch.no_grad():
                     for inputs, _ in loader:
                         inputs = inputs.to(device)
@@ -353,19 +353,74 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                             scores.append(score)
                         scores = torch.stack(scores, dim=0)  # (num_cls, batch)
                         max_ood_score, max_idx = scores.max(dim=0)  # (batch,)
-                        clf_max_counter += torch.bincount(max_idx.cpu(), minlength=len(task_classifiers)).numpy()
+                        # clf_max_counter += torch.bincount(max_idx.cpu(), minlength=len(task_classifiers)).numpy()
                         conf = 1.0 - max_ood_score if args.ood_score_type == "sigmoid" else -max_ood_score  # ID confidence
                         all_scores.append(conf.cpu())
                 # wandb 로깅: classifier별 max 선택된 횟수
-                if args.wandb:
-                    import wandb
-                    data = [[i, int(clf_max_counter[i])] for i in range(len(task_classifiers))]
-                    table = wandb.Table(data=data, columns=["classifier", f"{label_name}_count"])
-                    wandb.log({f"TASKCLS_{label_name}_max_counts/Task{task_id}": table, "TASK": task_id})
+                # if args.wandb:
+                #     import wandb
+                #     data = [[i, int(clf_max_counter[i])] for i in range(len(task_classifiers))]
+                #     table = wandb.Table(data=data, columns=["classifier", f"{label_name}_count"])
+                #     wandb.log({f"TASKCLS_{label_name}_max_counts/Task{task_id}": table, "TASK": task_id})
                 return torch.cat(all_scores, dim=0)
 
             id_scores  = _gather_taskcls_scores(id_loader, "ID")
             ood_scores = _gather_taskcls_scores(ood_loader, "OOD")
+            # === 추가: TASKCLS 분포 그리드 로깅 ===
+            if args.wandb:
+                import matplotlib.pyplot as plt
+                import wandb
+
+                # 각 task별 ID 데이터 로더 구성
+                id_task_datasets = id_datasets.dataset
+                task_id_loaders = [torch.utils.data.DataLoader(ds,
+                                                                batch_size=args.batch_size,
+                                                                shuffle=False,
+                                                                num_workers=args.num_workers)
+                                   for ds in id_task_datasets]
+
+                # OOD 로더를 마지막 열로 추가
+                task_id_loaders.append(ood_loader)
+                col_names = [f"T{idx+1}" for idx in range(len(id_task_datasets))] + ["OOD"]
+
+                # TE × (tasks+OOD) 점수 수집
+                grid_scores = [[None for _ in range(len(task_id_loaders))]
+                               for _ in range(len(task_classifiers))]
+
+                learner._network.eval()
+                with torch.no_grad():
+                    for col_idx, ldr in enumerate(task_id_loaders):
+                        for inputs, _ in ldr:
+                            inputs = inputs.to(device)
+                            feats = extract_feats(inputs)
+                            for row_idx, cls in enumerate(task_classifiers):
+                                logit = cls(feats).squeeze()
+                                score = torch.sigmoid(logit) if args.ood_score_type == "sigmoid" else logit
+                                conf  = 1.0 - score if args.ood_score_type == "sigmoid" else -score
+                                if grid_scores[row_idx][col_idx] is None:
+                                    grid_scores[row_idx][col_idx] = conf.cpu()
+                                else:
+                                    grid_scores[row_idx][col_idx] = torch.cat([
+                                        grid_scores[row_idx][col_idx],
+                                        conf.cpu()
+                                    ], dim=0)
+
+                # Grid 히스토그램 시각화
+                n_rows, n_cols = len(task_classifiers), len(task_id_loaders)
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2 * n_rows), squeeze=False)
+                for r in range(n_rows):
+                    for c in range(n_cols):
+                        ax = axes[r][c]
+                        ax.hist(grid_scores[r][c].numpy(), bins=30, color="steelblue", alpha=0.7)
+                        if r == 0:
+                            ax.set_title(col_names[c])
+                        if c == 0:
+                            ax.set_ylabel(f"TE{r+1}")
+                        ax.set_xticks([])
+                        ax.set_yticks([])
+                plt.tight_layout()
+                wandb.log({f"TASKCLS_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
+                plt.close(fig)
         else:
             # 네트워크 모델을 위한 래퍼 클래스 생성
             class ModelWrapper:

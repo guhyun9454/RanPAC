@@ -372,7 +372,8 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 import wandb
 
                 # 각 task별 ID 데이터 로더 구성
-                id_task_datasets = id_datasets.dataset
+                # ConcatDataset 는 .datasets 리스트를 보유하며, 단일 데이터셋일 경우에는 해당 속성이 없음
+                id_task_datasets = id_datasets.datasets
                 task_id_loaders = [torch.utils.data.DataLoader(ds,
                                                                 batch_size=args.batch_size,
                                                                 shuffle=False,
@@ -405,19 +406,32 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                                         conf.cpu()
                                     ], dim=0)
 
-                # Grid 히스토그램 시각화
+                # === Grid 히스토그램 시각화 ===
+                # (1) 범위 계산 (전 subplot 공통 범위)
+                global_min = min([torch.min(x).item() for row in grid_scores for x in row])
+                global_max = max([torch.max(x).item() for row in grid_scores for x in row])
+
                 n_rows, n_cols = len(task_classifiers), len(task_id_loaders)
-                fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2 * n_rows), squeeze=False)
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.2 * n_rows), squeeze=False)
+
                 for r in range(n_rows):
                     for c in range(n_cols):
                         ax = axes[r][c]
-                        ax.hist(grid_scores[r][c].numpy(), bins=30, color="steelblue", alpha=0.7)
+                        data_cell = grid_scores[r][c].numpy()
+                        ax.hist(data_cell, bins=30, range=(global_min, global_max), color="steelblue", alpha=0.7)
+                        # 축 라벨 및 타이틀
                         if r == 0:
                             ax.set_title(col_names[c])
                         if c == 0:
                             ax.set_ylabel(f"TE{r+1}")
-                        ax.set_xticks([])
+                        # x-축 범위 및 틱
+                        ax.set_xlim(global_min, global_max)
+                        ax.tick_params(axis='x', labelsize=6)
                         ax.set_yticks([])
+                        # 셀별 값 범위 텍스트
+                        cell_min, cell_max = data_cell.min(), data_cell.max()
+                        ax.text(0.5, 0.9, f"[{cell_min:.1f}, {cell_max:.1f}]", transform=ax.transAxes,
+                                ha='center', va='top', fontsize=6, color='dimgray')
                 plt.tight_layout()
                 wandb.log({f"TASKCLS_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
                 plt.close(fig)

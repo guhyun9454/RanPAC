@@ -159,8 +159,10 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None):
     # 1) 데이터셋 크기 맞추기
     id_size, ood_size = len(id_datasets), len(ood_dataset)
     min_size = min(id_size, ood_size)
-    if args.develop or args.ood_develop:
+    if args.develop:
         min_size = 1000
+    if args.ood_develop:
+        min_size = args.ood_develop
     if args.verbose:
         print(f"ID dataset size: {id_size}, OOD dataset size: {ood_size}. Using {min_size} samples each for evaluation.")
 
@@ -341,7 +343,7 @@ def get_parser():
     p.add_argument("--ood_method", default="ALL", type=str)
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--develop", action="store_true")
-    p.add_argument("--ood_develop", action="store_true")
+    p.add_argument("--ood_develop", type=int, default=None)
     
     # wandb 관련 인자 추가
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name")

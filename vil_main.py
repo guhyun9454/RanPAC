@@ -5,6 +5,7 @@ import random
 import torch.nn.functional as F
 from tqdm import tqdm
 from sklearn.metrics import roc_curve, auc
+from torchvision import transforms as T
 
 from continual_datasets.build_incremental_scenario import build_continual_dataloader
 from RanPAC import Learner
@@ -83,12 +84,48 @@ class IDLabelWrapper(torch.utils.data.Dataset):
         x, _ = self.dataset[idx]
         return x, 0
 
+# ------------------------------------------------------------------ #
+# Synthetic OOD dataset utilities                                    #
+# ------------------------------------------------------------------ #
+class GaussianNoiseDataset(torch.utils.data.Dataset):
+    """랜덤 가우시안 노이즈 이미지를 생성하는 데이터셋."""
+    def __init__(self, num_samples, image_shape, seed=0):
+        self.num_samples = num_samples
+        self.image_shape = image_shape
+        self.rng = np.random.RandomState(seed)
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        img = torch.tensor(self.rng.randn(*self.image_shape), dtype=torch.float32)
+        return img, -1  # dummy label
+
+
+class BlurNoiseWrapper(torch.utils.data.Dataset):
+    """기존 ID 이미지를 블러 및 노이즈를 섞어 OOD 샘플로 변환합니다."""
+    def __init__(self, dataset, noise_std=0.2, blur_kernel=7):
+        self.dataset = dataset
+        self.noise_std = noise_std
+        self.blur = T.GaussianBlur(kernel_size=blur_kernel, sigma=(1.0, 2.0))
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, _ = self.dataset[idx]
+        if not isinstance(img, torch.Tensor):
+            img = T.ToTensor()(img)
+        img = self.blur(img)
+        img = img + torch.randn_like(img) * self.noise_std
+        img = torch.clamp(img, 0.0, 1.0)
+        return img, -1  # dummy label
 
 # ------------------------------------------------------------------ #
 # Task-specific OOD classifier 학습 함수
 # ------------------------------------------------------------------ #
-def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
-    """현재 task에 대한 binary OOD classifier(0:ID, 1:OOD)를 학습합니다."""
+def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
+    """현재 task에 대한 binary TE(Task Expert) classifier(0:ID, 1:OOD)를 학습합니다."""
 
     # 1) 데이터셋 크기 맞추기
     id_size, ood_size = len(id_dataset), len(ood_dataset)
@@ -106,7 +143,7 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
     combined_dataset = ConcatDataset([id_wrapped, ood_wrapped])
     loader = torch.utils.data.DataLoader(
         combined_dataset,
-        batch_size=args.ood_cls_batch_size,
+        batch_size=args.te_batch_size,
         shuffle=True,
         num_workers=args.num_workers,
     )
@@ -114,7 +151,7 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
     # ------------------------------------------------------------
     # feature extraction helper
     # ------------------------------------------------------------
-    feature_type = args.ood_cls_feature.lower()
+    feature_type = args.te_feature.lower()
 
     def extract_feats(inputs):
         """Return feature tensor according to feature_type."""
@@ -149,11 +186,11 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
     # 3) classifier 정의 (simple logistic regression)
     classifier = torch.nn.Linear(feat_dim, 1).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(classifier.parameters(), lr=args.ood_cls_lr)
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=args.te_lr)
 
     # 4) 학습
     classifier.train()
-    for epoch in range(args.ood_cls_epochs):
+    for epoch in range(args.te_epochs):
         epoch_loss = 0.0
         for imgs, labels in loader:
             imgs   = imgs.to(device)
@@ -170,7 +207,7 @@ def train_task_ood_classifier(learner, id_dataset, ood_dataset, device, args):
             optimizer.step()
 
             epoch_loss += loss.item()
-        print(f"Epoch {epoch+1}/{args.ood_cls_epochs} loss: {epoch_loss/len(loader):.4f}")
+        print(f"Epoch {epoch+1}/{args.te_epochs} loss: {epoch_loss/len(loader):.4f}")
     classifier.eval()
     return classifier
 
@@ -258,14 +295,10 @@ def evaluate_till_now(model, loaders, device, task_id,
     save_accuracy_heatmap(result, task_id, args)
     return A_last, A_avg, forgetting
 
-# ========================= OOD 평가 함수 개정 ============================ #
-#   * 기존 adapter 기반 방법 + 새 TASKCLS 방법 통합                        #
-# ====================================================================== #
-def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, task_classifiers=None):
-    """OOD 평가를 위한 통합 함수 (adapter 기반)"""
+def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, task_experts=None):
+    """OOD 평가를 위한 통합 함수 (adapter 기반, TE 방식 포함)"""
     learner._network.eval()
     
-    # === New unified OOD evaluation (adapter 기반) ===
     ood_method = args.ood_method.upper()
 
     # 1) 데이터셋 크기 맞추기
@@ -282,11 +315,9 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
     id_loader = torch.utils.data.DataLoader(id_dataset_aligned, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     ood_loader = torch.utils.data.DataLoader(ood_dataset_aligned, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    # 2) 평가할 방법 결정
     from OODdetectors.ood_adapter import SUPPORTED_METHODS, compute_ood_scores
 
-    # 새 방법 추가
-    EXTRA_METHODS = ["TASKCLS"]
+    EXTRA_METHODS = ["TE"]
 
     if ood_method == "ALL":
         methods = SUPPORTED_METHODS + EXTRA_METHODS
@@ -302,12 +333,12 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
     results = {}
 
     for method in methods:
-        if method == "TASKCLS":
-            if not task_classifiers:
-                raise ValueError("TASKCLS 평가를 위해서는 task_classifiers 리스트가 필요합니다.")
+        if method == "TE":
+            if not task_experts:
+                raise ValueError("TE 평가를 위해서는 task_experts 리스트가 필요합니다.")
 
             # feature 기반 score 계산 함수 정의
-            feature_type = args.ood_cls_feature.lower()
+            feature_type = args.te_feature.lower()
 
             def extract_feats(inputs):
                 if feature_type == 'logits':
@@ -337,42 +368,32 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 # Default: raw features
                 return feats
 
-            def _gather_taskcls_scores(loader, label_name):
+            def _gather_te_scores(loader, label_name):
                 all_scores = []
                 learner._network.eval()
-                # clf_max_counter = np.zeros(len(task_classifiers), dtype=int)
                 with torch.no_grad():
                     for inputs, _ in loader:
                         inputs = inputs.to(device)
                         feats = extract_feats(inputs)
                         # 각 classifier 의 OOD 확률 계산 후 max
                         scores = []
-                        for cls in task_classifiers:
+                        for cls in task_experts:
                             logit = cls(feats).squeeze()
-                            score = torch.sigmoid(logit) if args.ood_score_type == "sigmoid" else logit
+                            score = torch.sigmoid(logit) if args.te_score_type == "sigmoid" else logit
                             scores.append(score)
                         scores = torch.stack(scores, dim=0)  # (num_cls, batch)
                         max_ood_score, max_idx = scores.max(dim=0)  # (batch,)
-                        # clf_max_counter += torch.bincount(max_idx.cpu(), minlength=len(task_classifiers)).numpy()
-                        conf = 1.0 - max_ood_score if args.ood_score_type == "sigmoid" else -max_ood_score  # ID confidence
+                        conf = 1.0 - max_ood_score if args.te_score_type == "sigmoid" else -max_ood_score  # ID confidence
                         all_scores.append(conf.cpu())
-                # wandb 로깅: classifier별 max 선택된 횟수
-                # if args.wandb:
-                #     import wandb
-                #     data = [[i, int(clf_max_counter[i])] for i in range(len(task_classifiers))]
-                #     table = wandb.Table(data=data, columns=["classifier", f"{label_name}_count"])
-                #     wandb.log({f"TASKCLS_{label_name}_max_counts/Task{task_id}": table, "TASK": task_id})
                 return torch.cat(all_scores, dim=0)
 
-            id_scores  = _gather_taskcls_scores(id_loader, "ID")
-            ood_scores = _gather_taskcls_scores(ood_loader, "OOD")
-            # === 추가: TASKCLS 분포 그리드 로깅 ===
+            id_scores  = _gather_te_scores(id_loader, "ID")
+            ood_scores = _gather_te_scores(ood_loader, "OOD")
             if args.wandb:
                 import matplotlib.pyplot as plt
                 import wandb
 
                 # 각 task별 ID 데이터 로더 구성
-                # ConcatDataset 는 .datasets 리스트를 보유하며, 단일 데이터셋일 경우에는 해당 속성이 없음
                 id_task_datasets = id_datasets.datasets
                 task_id_loaders = [torch.utils.data.DataLoader(ds,
                                                                 batch_size=args.batch_size,
@@ -386,7 +407,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
 
                 # TE × (tasks+OOD) 점수 수집
                 grid_scores = [[None for _ in range(len(task_id_loaders))]
-                               for _ in range(len(task_classifiers))]
+                               for _ in range(len(task_experts))]
 
                 learner._network.eval()
                 with torch.no_grad():
@@ -394,10 +415,10 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                         for inputs, _ in ldr:
                             inputs = inputs.to(device)
                             feats = extract_feats(inputs)
-                            for row_idx, cls in enumerate(task_classifiers):
+                            for row_idx, cls in enumerate(task_experts):
                                 logit = cls(feats).squeeze()
-                                score = torch.sigmoid(logit) if args.ood_score_type == "sigmoid" else logit
-                                conf  = 1.0 - score if args.ood_score_type == "sigmoid" else -score
+                                score = torch.sigmoid(logit) if args.te_score_type == "sigmoid" else logit
+                                conf  = 1.0 - score if args.te_score_type == "sigmoid" else -score
                                 if grid_scores[row_idx][col_idx] is None:
                                     grid_scores[row_idx][col_idx] = conf.cpu()
                                 else:
@@ -411,7 +432,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 global_min = min([torch.min(x).item() for row in grid_scores for x in row])
                 global_max = max([torch.max(x).item() for row in grid_scores for x in row])
 
-                n_rows, n_cols = len(task_classifiers), len(task_id_loaders)
+                n_rows, n_cols = len(task_experts), len(task_id_loaders)
                 fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.2 * n_rows), squeeze=False)
 
                 for r in range(n_rows):
@@ -433,7 +454,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                         ax.text(0.5, 0.9, f"[{cell_min:.1f}, {cell_max:.1f}]", transform=ax.transAxes,
                                 ha='center', va='top', fontsize=6, color='dimgray')
                 plt.tight_layout()
-                wandb.log({f"TASKCLS_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
+                wandb.log({f"TE_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
                 plt.close(fig)
         else:
             # 네트워크 모델을 위한 래퍼 클래스 생성
@@ -511,7 +532,11 @@ def vil_train(args):
     # 각 데이터셋을 개별적으로 로드한 뒤 ConcatDataset 으로 합칩니다.
     if args.ood_train_dataset:
         dataset_names = [name.strip() for name in args.ood_train_dataset.split(',') if name.strip()]
-        if len(dataset_names) == 1:
+
+        # 'random' 또는 'blur' 옵션은 per-task 단계에서 동적으로 생성하므로 여기서는 None 으로 처리
+        if len(dataset_names) == 1 and dataset_names[0].lower() in {"random", "blur"}:
+            ood_train_dataset = None
+        elif len(dataset_names) == 1:
             ood_train_dataset = get_ood_dataset(dataset_names[0], args)
         else:
             # 여러 데이터셋을 로드한 뒤 하나로 결합하되, 각 데이터셋에서 동일한 개수의 샘플을 사용하도록
@@ -544,7 +569,7 @@ def vil_train(args):
     log_book   = {"A_last": [], "A_avg": [], "Forgetting": [], "Task_Time": []}
     
     total_start_time = time.time()
-    task_ood_classifiers = []  # 각 task 별 binary OOD classifier 저장
+    task_experts = []  # 각 task 별 binary TE classifier 저장
 
     for tid in range(num_tasks):
         print(f"{' Training Task ' + str(tid):=^60}")
@@ -559,12 +584,44 @@ def vil_train(args):
         learner.incremental_train(dm)      # FULL RanPAC pipeline
 
         # -----------------------------------------------------------
-        # (1) Task-specific OOD classifier 학습
+        # (1) Task expert(TE) classifier 학습
         # -----------------------------------------------------------
-        if ood_train_dataset is not None:
+        if args.ood_train_dataset:
             id_train_dataset = loaders[tid]['train'].dataset
-            cls = train_task_ood_classifier(learner, id_train_dataset, ood_train_dataset, devices[0], args)
-            task_ood_classifiers.append(cls)
+
+            ood_flag = args.ood_train_dataset.lower()
+
+            if ood_flag == "random":
+                sample_img = id_train_dataset[0][0]
+                if isinstance(sample_img, torch.Tensor):
+                    img_shape = sample_img.shape
+                else:
+                    img_shape = T.ToTensor()(sample_img).shape
+                num_samples = len(id_train_dataset)
+                ood_ds_task = GaussianNoiseDataset(num_samples, img_shape, seed=args.seed + tid)
+
+            elif ood_flag == "blur":
+                ood_ds_task = BlurNoiseWrapper(id_train_dataset)
+
+            else:
+                ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
+
+            # 샘플 시각화 wandb 로깅 (최대 20장)
+            if args.wandb:
+                import wandb, torchvision.utils as vutils
+                n_vis = min(20, len(ood_ds_task))
+                idxs = torch.randint(0, len(ood_ds_task), (n_vis,))
+                imgs = []
+                for i in idxs:
+                    img, _ = ood_ds_task[i]
+                    if not isinstance(img, torch.Tensor):
+                        img = T.ToTensor()(img)
+                    imgs.append(img)
+                grid = vutils.make_grid(imgs, nrow=5, normalize=True, value_range=(0,1))
+                wandb.log({f"TE_ood_samples/Task{tid}": wandb.Image(grid), "TASK": tid})
+
+            cls = train_te_classifier(learner, id_train_dataset, ood_ds_task, devices[0], args)
+            task_experts.append(cls)
 
         A_last, A_avg, F = evaluate_till_now(
             learner, loaders, devices[0], tid, acc_matrix, args
@@ -581,7 +638,7 @@ def vil_train(args):
             id_datasets = torch.utils.data.ConcatDataset(id_val_sets)
             ood_dataset = loaders[-1]['ood']
             # evaluate_ood() 호출 (원본과 동일한 로직)
-            _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_classifiers=task_ood_classifiers)
+            _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_experts=task_experts)
         else:
             print("OOD 평가를 위한 데이터셋이 지정되지 않았습니다.")
 
@@ -654,14 +711,14 @@ def get_parser():
 
     # === Task-specific OOD classifier 관련 인자 ===
     p.add_argument('--ood_train_dataset', type=str, default=None,
-                   help='Comma-separated OOD dataset list used for training task-specific classifiers (e.g., "EMNIST,KMNIST")')
-    p.add_argument('--ood_cls_epochs', type=int, default=1, help='Epochs to train task-specific OOD classifier')
-    p.add_argument('--ood_cls_lr', type=float, default=1e-3, help='Learning rate for task-specific OOD classifier')
-    p.add_argument('--ood_cls_batch_size', type=int, default=256, help='Batch size for task-specific OOD classifier')
-    p.add_argument('--ood_cls_feature', type=str, default='feat', choices=['feat','rp','decorr','logits'],
-                   help='Feature type for task OOD classifier: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
-    p.add_argument('--ood_score_type', type=str, default='sigmoid', choices=['sigmoid','logit'],
-                   help='Score type for TASKCLS OOD confidence: use sigmoid probability or raw logit')
+                   help='OOD 데이터셋 지정: "random"(가우시안), "blur"(ID 블러+노이즈) 또는 콤마로 구분된 실제 OOD 데이터셋 이름 목록(e.g., "EMNIST,KMNIST")')
+    p.add_argument('--te_epochs', type=int, default=1, help='Epochs to train task expert binary classifier')
+    p.add_argument('--te_lr', type=float, default=1e-3, help='Learning rate for task expert binary classifier')
+    p.add_argument('--te_batch_size', type=int, default=256, help='Batch size for task expert binary classifier')
+    p.add_argument('--te_feature', type=str, default='rp', choices=['feat','rp','decorr','logits'],
+                   help='Feature type for task expert: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
+    p.add_argument('--te_score_type', type=str, default='logit', choices=['sigmoid','logit'],
+                   help='Score type for TE OOD confidence: use sigmoid probability or raw logit')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

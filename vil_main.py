@@ -103,11 +103,18 @@ class GaussianNoiseDataset(torch.utils.data.Dataset):
 
 
 class BlurNoiseWrapper(torch.utils.data.Dataset):
-    """기존 ID 이미지를 블러 및 노이즈를 섞어 OOD 샘플로 변환합니다."""
-    def __init__(self, dataset, noise_std=0.2, blur_kernel=7):
+    """기존 ID 이미지를 GaussianBlur & 가우시안 노이즈로 변환하여 OOD 샘플을 생성합니다.
+
+    Args:
+        dataset: 원본 ID 데이터셋
+        noise_std: 추가할 가우시안 노이즈 표준편차
+        blur_kernel: GaussianBlur 커널 크기(홀수)
+        blur_sigma:  블러 강도 (sigma). 크면 더 흐려짐
+    """
+    def __init__(self, dataset, noise_std=0.2, blur_kernel=7, blur_sigma=3.0):
         self.dataset = dataset
         self.noise_std = noise_std
-        self.blur = T.GaussianBlur(kernel_size=blur_kernel, sigma=(1.0, 2.0))
+        self.blur = T.GaussianBlur(kernel_size=blur_kernel, sigma=(blur_sigma, blur_sigma*1.5))
 
     def __len__(self):
         return len(self.dataset)
@@ -601,7 +608,10 @@ def vil_train(args):
                 ood_ds_task = GaussianNoiseDataset(num_samples, img_shape, seed=args.seed + tid)
 
             elif ood_flag == "blur":
-                ood_ds_task = BlurNoiseWrapper(id_train_dataset)
+                ood_ds_task = BlurNoiseWrapper(id_train_dataset,
+                                               noise_std=args.te_noise_std,
+                                               blur_kernel=args.te_blur_kernel,
+                                               blur_sigma=args.te_blur_sigma)
 
             else:
                 ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
@@ -719,6 +729,14 @@ def get_parser():
                    help='Feature type for task expert: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
     p.add_argument('--te_score_type', type=str, default='logit', choices=['sigmoid','logit'],
                    help='Score type for TE OOD confidence: use sigmoid probability or raw logit')
+
+    # --- Blur/Noise 하이퍼파라미터 ---
+    p.add_argument('--te_noise_std', type=float, default=0.2,
+                   help='Blur OOD 샘플에 추가할 가우시안 노이즈 표준편차')
+    p.add_argument('--te_blur_kernel', type=int, default=7,
+                   help='Blur OOD 샘플에 적용할 GaussianBlur 커널 크기 (홀수)')
+    p.add_argument('--te_blur_sigma', type=float, default=3.0,
+                   help='Blur OOD 샘플에 적용할 sigma 값(크면 더 강한 블러)')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

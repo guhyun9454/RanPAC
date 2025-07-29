@@ -303,7 +303,7 @@ def evaluate_till_now(model, loaders, device, task_id,
     save_accuracy_heatmap(result, task_id, args)
     return A_last, A_avg, forgetting
 
-def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, task_experts=None):
+def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, task_experts=None, ood_components=None):
     """OOD 평가를 위한 통합 함수 (adapter 기반, TE 방식 포함)"""
     learner._network.eval()
     
@@ -403,17 +403,33 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 import matplotlib.pyplot as plt
                 import wandb
 
-                # 각 task별 ID 데이터 로더 구성
-                id_task_datasets = id_datasets.datasets
+                # ---------------- Grid column 구성 ----------------
+                id_task_datasets = id_datasets.datasets  # ID (각 태스크)
+
                 task_id_loaders = [torch.utils.data.DataLoader(ds,
                                                                 batch_size=args.batch_size,
                                                                 shuffle=False,
                                                                 num_workers=args.num_workers)
                                    for ds in id_task_datasets]
 
-                # OOD 로더를 마지막 열로 추가
-                task_id_loaders.append(ood_loader)
-                col_names = [f"T{idx+1}" for idx in range(len(id_task_datasets))] + ["OOD"]
+                col_names = [f"T{idx+1}" for idx in range(len(id_task_datasets))]  # ID cols
+
+                # (1) unseen & 외부 OOD component 처리
+                component_loaders = []
+                if ood_components:
+                    for comp_name, comp_ds in ood_components:
+                        component_loaders.append(torch.utils.data.DataLoader(comp_ds,
+                                                                             batch_size=args.batch_size,
+                                                                             shuffle=False,
+                                                                             num_workers=args.num_workers))
+                        col_names.append(f"OOD({comp_name})")
+                else:
+                    # fallback: 기존 하나의 OOD 로더 사용
+                    component_loaders.append(ood_loader)
+                    col_names.append("OOD")
+
+                # 최종 column loader 리스트 결합
+                task_id_loaders.extend(component_loaders)
 
                 # TE × (tasks+OOD) 점수 수집
                 grid_scores = [[None for _ in range(len(task_id_loaders))]
@@ -449,7 +465,9 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                     for c in range(n_cols):
                         ax = axes[r][c]
                         data_cell = grid_scores[r][c].numpy()
-                        ax.hist(data_cell, bins=30, range=(global_min, global_max), color="steelblue", alpha=0.7)
+                        # 색상 지정: ID(파란), OOD(빨간)
+                        bar_color = "steelblue" if not col_names[c].startswith("OOD") else "indianred"
+                        ax.hist(data_cell, bins=30, range=(global_min, global_max), color=bar_color, alpha=0.7)
                         # 축 라벨 및 타이틀
                         if r == 0:
                             ax.set_title(col_names[c])
@@ -688,7 +706,19 @@ def vil_train(args):
                 print("Warning: 사용할 OOD 데이터셋이 없습니다. OOD 평가를 건너뜁니다.")
             else:
                 ood_dataset = dataset_list[0] if len(dataset_list) == 1 else ConcatDataset(dataset_list)
-                _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_experts=task_experts)
+                # --- prepare component list for grid viz ---
+                ood_components = []
+                if args.ood_dataset and unseen_flag:
+                    for u in unseen_task_ids:
+                        ood_components.append((f"T{u+1}", loaders[u]['val'].dataset))
+                # 외부 OOD 데이터셋 이름 매핑 (external_names list는 상위 scope에 존재)
+                if external_ood_datasets:
+                    for name, ds in zip(external_names, external_ood_datasets):
+                        ood_components.append((name, ds))
+
+                _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args,
+                                 task_id=tid, task_experts=task_experts,
+                                 ood_components=ood_components)
         else:
             print("OOD 평가를 위한 데이터셋이 지정되지 않았습니다.")
 

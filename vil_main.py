@@ -12,6 +12,7 @@ from RanPAC import Learner
 from continual_datasets.dataset_utils import set_data_config
 from continual_datasets.dataset_utils import get_ood_dataset
 from continual_datasets.dataset_utils import RandomSampleWrapper, UnknownWrapper
+from continual_datasets.dataset_utils import find_tasks_with_unseen_classes
 
 from torch.utils.data import ConcatDataset
 from utils.acc_heatmap import save_accuracy_heatmap
@@ -533,8 +534,29 @@ def vil_train(args):
         args.wandb = False
 
     loaders, class_mask, domain_list = build_continual_dataloader(args)
+    # ---------------- OOD dataset parsing ----------------
+    unseen_flag = False             # 'unseen' 플래그 여부
+    external_ood_datasets = []      # 외부 OOD 테스트 데이터셋 목록
+
     if args.ood_dataset:
-        loaders[-1]['ood'] = get_ood_dataset(args.ood_dataset, args)
+        dataset_tokens = [name.strip() for name in args.ood_dataset.split(',') if name.strip()]
+
+        # (1) unseen 플래그 체크
+        unseen_flag = any(tok.lower() == 'unseen' for tok in dataset_tokens)
+
+        # (2) 나머지 외부 OOD 데이터셋 로드
+        external_names = [tok for tok in dataset_tokens if tok.lower() != 'unseen']
+        for n in external_names:
+            external_ood_datasets.append(get_ood_dataset(n, args))
+
+    # (3) 단일 / 다중 외부 OOD 데이터셋 concat
+    global_ood_dataset = None
+    if external_ood_datasets:
+        global_ood_dataset = external_ood_datasets[0] if len(external_ood_datasets) == 1 else ConcatDataset(external_ood_datasets)
+        # 기존 로직과의 호환성을 위해 마지막 loader dict에 저장
+        loaders[-1]['ood'] = global_ood_dataset
+    else:
+        global_ood_dataset = None
 
     # OOD 학습용 데이터셋 준비 (optional)
     # --ood_train_dataset 인자에 여러 개의 데이터셋을 콤마(,)로 나열하면
@@ -648,9 +670,25 @@ def vil_train(args):
             # ID val dataset 합치기
             id_val_sets = [loaders[t]['val'].dataset for t in range(tid+1)]
             id_datasets = torch.utils.data.ConcatDataset(id_val_sets)
-            ood_dataset = loaders[-1]['ood']
-            # evaluate_ood() 호출 (원본과 동일한 로직)
-            _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_experts=task_experts)
+
+            # --- Build OOD dataset for current task ---
+            dataset_list = []
+
+            # (A) unseen classes (future task val sets)
+            if args.ood_dataset and unseen_flag:
+                unseen_task_ids = find_tasks_with_unseen_classes(tid, class_mask)
+                print("unseen_task_ids", unseen_task_ids)
+                dataset_list.extend([loaders[u]['val'].dataset for u in unseen_task_ids])
+
+            # (B) external OOD datasets (EMNIST 등)
+            if global_ood_dataset is not None:
+                dataset_list.append(global_ood_dataset)
+
+            if not dataset_list:
+                print("Warning: 사용할 OOD 데이터셋이 없습니다. OOD 평가를 건너뜁니다.")
+            else:
+                ood_dataset = dataset_list[0] if len(dataset_list) == 1 else ConcatDataset(dataset_list)
+                _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_experts=task_experts)
         else:
             print("OOD 평가를 위한 데이터셋이 지정되지 않았습니다.")
 

@@ -191,7 +191,17 @@ def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
         feat_dim = extract_feats(sample_x.unsqueeze(0).to(device)).shape[1]
 
     # 3) classifier 정의 (simple logistic regression)
-    classifier = torch.nn.Linear(feat_dim, 1).to(device)
+    # Dropout이 포함된 binary classifier 정의
+    class TEClassifier(torch.nn.Module):
+        def __init__(self, input_dim, dropout_prob=0.2):
+            super().__init__()
+            self.dropout = torch.nn.Dropout(p=dropout_prob)
+            self.fc = torch.nn.Linear(input_dim, 1)
+        def forward(self, x):
+            x = self.dropout(x)
+            return self.fc(x).squeeze()
+
+    classifier = TEClassifier(feat_dim, dropout_prob=args.te_dropout).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(classifier.parameters(), lr=args.te_lr)
 
@@ -265,25 +275,150 @@ class LoaderDataManager:
 
 
 def evaluate_till_now(model, loaders, device, task_id,
-                      acc_matrix, args):
+                      acc_matrix, args, task_experts=None):
+    """기존 IL 정확도 + TE 기반 8개 변형 정확도(가중치/마스킹)를 계산합니다.
+
+    변형 이름:
+        ORIG,
+        TE_<agg>_WEIGHT,
+        TE_<agg>_MASK   (agg ∈ args.te_agg_methods)
+    """
+
+    # ------------------------------------------------------------------
+    # Helper: class→task 매핑 벡터 준비 (길이 = 총 클래스 수)
+    # ------------------------------------------------------------------
+    total_cls = model._network.fc.out_features  # 현재까지 head 크기
+    cls2task = np.zeros(total_cls, dtype=int)
+    for t_idx, (lo, hi) in enumerate(model.class_increments):
+        cls2task[lo:hi + 1] = t_idx
+
+    # ------------------------------------------------------------------
+    # TE 관련 헬퍼 (skip if task_experts 없음)
+    # ------------------------------------------------------------------
+    if task_experts:
+        agg_methods = [m.strip().lower() for m in args.te_agg_methods.split(',')]
+
+        feature_type = args.te_feature.lower()
+
+        def extract_feats(inputs):
+            if feature_type == 'logits':
+                return model._network(inputs)["logits"].detach()
+            feats = model._network.convnet(inputs).detach()
+            if feature_type in {'rp', 'decorr'}:
+                W_rand = getattr(model, 'W_rand', None)
+                if W_rand is None:
+                    W_rand = getattr(getattr(model._network, 'fc', None), 'W_rand', None)
+                if W_rand is not None:
+                    feats = F.relu(feats @ W_rand)
+                if feature_type == 'rp':
+                    return feats
+            if feature_type == 'decorr':
+                G = getattr(model, 'G', None)
+                eps = 1e6
+                G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+                feats = feats @ G_inv
+                return feats
+            return feats
+
+        def _mc_preds(feats):
+            mc = args.te_mc_passes
+            ps = []
+            for cls in task_experts:
+                cls.train()
+                outs = []
+                for _ in range(mc):
+                    logit = cls(feats)
+                    score = torch.sigmoid(logit) if args.te_score_type == 'sigmoid' else logit
+                    outs.append(score)
+                outs = torch.stack(outs, dim=-1)  # (B, mc)
+                ps.append(outs)
+                cls.eval()
+            return torch.stack(ps, dim=0)  # (num_te, B, mc)
+
+        def _task_confidence(stacked, agg):
+            mean = stacked.mean(-1)  # (num_te, B)
+            std  = stacked.std(-1)
+            if agg in {'mean', 'max', 'wsum'}:
+                conf = mean  # raw mean confidence per TE
+            elif agg == 'std':
+                conf = -std  # std가 작을수록 ID 가능 ↑
+            else:
+                raise ValueError(agg)
+            return conf  # (num_te, B)
+
+    # ------------------------------------------------------------------
+    # 정확도 집계 구조 준비
+    # ------------------------------------------------------------------
+    variants = ["ORIG"]
+    if task_experts:
+        for a in agg_methods:
+            variants.extend([f"TE_{a.upper()}_WEIGHT", f"TE_{a.upper()}_MASK"])
+    correct_tbl = {k: np.zeros(task_id + 1, dtype=int) for k in variants}
+    total_tbl   = {k: np.zeros(task_id + 1, dtype=int) for k in variants}
+
+    # ------------------------------------------------------------------
+    # 각 과거 task 의 validation 에 대해 평가
+    # ------------------------------------------------------------------
     for t in range(task_id + 1):
-        correct, total = 0, 0
+        loader = loaders[t]['val']
         model._network.eval()
         with torch.no_grad():
-            for x, y in loaders[t]['val']:
+            for x, y in loader:
                 x, y = x.to(device), y.to(device)
-                pred = model._network(x)['logits'].argmax(1)
-                correct += (pred == y).sum().item()
-                total   += y.size(0)
-        acc_matrix[t, task_id] = 100. * correct / total
 
+                logits = model._network(x)['logits']  # (B, C)
+                pred_orig = logits.argmax(1)
+                correct_tbl['ORIG'][t] += (pred_orig == y).sum().item()
+                total_tbl['ORIG'][t]   += y.size(0)
+
+                if not task_experts:
+                    continue  # skip TE variants if none
+
+                feats = extract_feats(x)
+                stacked = _mc_preds(feats)  # (num_te, B, mc)
+
+                for agg in agg_methods:
+                    conf = _task_confidence(stacked, agg)  # (num_te, B)
+
+                    # weight variant ----------------------------------
+                    w = torch.softmax(conf, dim=0)  # (num_te, B)
+                    # class-wise weight matrix (B, C)
+                    w_expanded = w[cls2task].T  # broadcast via numpy idx → torch idx
+                    weighted_logits = logits * w_expanded.to(device)
+                    pred_w = weighted_logits.argmax(1)
+                    key_w = f"TE_{agg.upper()}_WEIGHT"
+                    correct_tbl[key_w][t] += (pred_w == y).sum().item()
+
+                    # mask variant ------------------------------------
+                    top_task = conf.argmax(0)  # (B,)
+                    # create mask: 1 for classes in top_task else 0
+                    mask = torch.zeros_like(weighted_logits)
+                    for idx_b, tt in enumerate(top_task):
+                        task = tt.item()
+                        lo, hi = model.class_increments[task]
+                        mask[idx_b, lo:hi+1] = 1.0
+                    masked_logits = logits.masked_fill(mask == 0, -1e9)
+                    pred_m = masked_logits.argmax(1)
+                    key_m = f"TE_{agg.upper()}_MASK"
+                    correct_tbl[key_m][t] += (pred_m == y).sum().item()
+
+                for key in variants:
+                    if key != 'ORIG':
+                        total_tbl[key][t] += y.size(0)
+
+        # after loader loop
+    # ------------------------------------------------------------------
+    # 정확도 계산 및 기존 acc_matrix 갱신 (ORIG 기준)
+    # ------------------------------------------------------------------
+    for t in range(task_id + 1):
+        acc_matrix[t, task_id] = 100.0 * correct_tbl['ORIG'][t] / max(total_tbl['ORIG'][t], 1)
+
+    # 요약 메트릭 (ORIG)
     A_i    = [np.mean(acc_matrix[:i+1, i]) for i in range(task_id+1)]
     A_last = A_i[-1]
     A_avg  = np.mean(A_i)
     if task_id > 0:
-        forgetting = np.mean(
-            (np.max(acc_matrix, axis=1) - acc_matrix[:, task_id])[:task_id]
-        )
+        forgetting = np.mean((np.max(acc_matrix, axis=1) - acc_matrix[:, task_id])[:task_id])
     else:
         forgetting = 0.0
 
@@ -291,15 +426,27 @@ def evaluate_till_now(model, loaders, device, task_id,
            f"A_last {A_last:.2f} | A_avg {A_avg:.2f} | "
            f"Forgetting {forgetting:.2f}")
     logging.info(msg); print(msg)
-    
-    # wandb 로깅 추가
+
+    # --- 추가: 변형 정확도 로깅
+    for key in variants:
+        for t in range(task_id + 1):
+            acc = 100.0 * correct_tbl[key][t] / max(total_tbl[key][t], 1)
+            logging.info(f"    {key} | Task{t+1}->{task_id+1}: {acc:.2f}%")
+
     if args.wandb:
         import wandb
-        wandb.log({"A_last (↑)": A_last, "A_avg (↑)": A_avg, "Forgetting (↓)": forgetting, "TASK": task_id})
+        log_data = {k: 100.0 * correct_tbl[k][task_id] / max(total_tbl[k][task_id], 1) for k in variants}
+        log_data['A_last'] = A_last
+        log_data['A_avg'] = A_avg
+        log_data['Forgetting'] = forgetting
+        log_data['TASK'] = task_id
+        wandb.log(log_data)
 
+    # 원본 accuracy 히트맵 저장 (변형 결과는 저장하지 않음)
     sub_matrix = acc_matrix[:task_id+1, :task_id+1]
     result = np.where(np.triu(np.ones_like(sub_matrix, dtype=bool)), sub_matrix, np.nan)
     save_accuracy_heatmap(result, task_id, args)
+
     return A_last, A_avg, forgetting
 
 def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, task_experts=None):
@@ -343,128 +490,108 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
 
     for method in methods:
         if method == "TE":
+            # === Uncertainty-aware TE aggregation ===
             if not task_experts:
                 raise ValueError("TE 평가를 위해서는 task_experts 리스트가 필요합니다.")
 
-            # feature 기반 score 계산 함수 정의
+            agg_methods = [m.strip().lower() for m in args.te_agg_methods.split(',')]
             feature_type = args.te_feature.lower()
 
             def extract_feats(inputs):
                 if feature_type == 'logits':
                     return learner._network(inputs)["logits"].detach()
-
-                # (2) Backbone features
-                feats = learner._network.convnet(inputs).detach()  # (B, D)
-
-                # (3) Random projection (shared by 'rp' and first step of 'decorr')
+                feats = learner._network.convnet(inputs).detach()
                 if feature_type in {'rp', 'decorr'}:
                     W_rand = getattr(learner, 'W_rand', None)
                     if W_rand is None:
                         W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
                     if W_rand is not None:
-                        feats = F.relu(feats @ W_rand)             # (B, M)
+                        feats = F.relu(feats @ W_rand)
                     if feature_type == 'rp':
                         return feats
-
-                # (4) Decorrelation step (applied after RP)
                 if feature_type == 'decorr':
                     G = getattr(learner, 'G', None)
-                    eps = 1000000
+                    eps = 1e6
                     G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
                     feats = feats @ G_inv
                     return feats
-
-                # Default: raw features
                 return feats
 
-            def _gather_te_scores(loader, label_name):
-                all_scores = []
+            def _mc_predictions(feats):
+                mc_passes = args.te_mc_passes
+                preds = []
+                for cls in task_experts:
+                    cls.train()  # dropout 활성화
+                    outs = []
+                    for _ in range(mc_passes):
+                        logit = cls(feats)
+                        score = torch.sigmoid(logit) if args.te_score_type == 'sigmoid' else logit
+                        outs.append(score)
+                    outs = torch.stack(outs, dim=-1)  # (batch, mc)
+                    preds.append(outs)
+                    cls.eval()
+                return torch.stack(preds, dim=0)  # (num_exp, batch, mc)
+
+            def _aggregate(stacked, agg):
+                means = stacked.mean(dim=-1)
+                stds = stacked.std(dim=-1)
+                if agg == 'max':
+                    score = means.max(dim=0).values
+                elif agg == 'mean':
+                    score = means.mean(dim=0)
+                elif agg in {'wsum', 'weighted'}:
+                    eps = 1e-6
+                    w = 1.0 / (stds + eps)
+                    w = w / w.sum(dim=0, keepdim=True)
+                    score = (w * means).sum(dim=0)
+                elif agg == 'std':
+                    score = -stds.mean(dim=0)  # 불확실도가 높을수록 OOD 가능성 ↑
+                else:
+                    raise ValueError(f"Unknown TE aggregation: {agg}")
+                return score
+
+            def _gather_scores(loader):
+                collected = {k: [] for k in agg_methods}
                 learner._network.eval()
                 with torch.no_grad():
                     for inputs, _ in loader:
                         inputs = inputs.to(device)
                         feats = extract_feats(inputs)
-                        # 각 classifier 의 OOD 확률 계산 후 max
-                        scores = []
-                        for cls in task_experts:
-                            logit = cls(feats).squeeze()
-                            score = torch.sigmoid(logit) if args.te_score_type == "sigmoid" else logit
-                            scores.append(score)
-                        scores = torch.stack(scores, dim=0)  # (num_cls, batch)
-                        max_ood_score, max_idx = scores.max(dim=0)  # (batch,)
-                        conf = 1.0 - max_ood_score if args.te_score_type == "sigmoid" else -max_ood_score  # ID confidence
-                        all_scores.append(conf.cpu())
-                return torch.cat(all_scores, dim=0)
+                        stacked = _mc_predictions(feats)
+                        for agg in agg_methods:
+                            s = _aggregate(stacked, agg)
+                            conf = 1.0 - s if args.te_score_type == 'sigmoid' and agg != 'std' else -s
+                            collected[agg].append(conf.cpu())
+                return {k: torch.cat(v, dim=0) for k, v in collected.items()}
 
-            id_scores  = _gather_te_scores(id_loader, "ID")
-            ood_scores = _gather_te_scores(ood_loader, "OOD")
-            if args.wandb:
-                import matplotlib.pyplot as plt
-                import wandb
+            id_scores_dict  = _gather_scores(id_loader)
+            ood_scores_dict = _gather_scores(ood_loader)
 
-                # 각 task별 ID 데이터 로더 구성
-                id_task_datasets = id_datasets.datasets
-                task_id_loaders = [torch.utils.data.DataLoader(ds,
-                                                                batch_size=args.batch_size,
-                                                                shuffle=False,
-                                                                num_workers=args.num_workers)
-                                   for ds in id_task_datasets]
+            for agg in agg_methods:
+                method_name = f"TE_{agg.upper()}"
+                id_scores  = id_scores_dict[agg]
+                ood_scores = ood_scores_dict[agg]
+                if args.verbose or args.wandb:
+                    hist_path = save_anomaly_histogram(id_scores.numpy(), ood_scores.numpy(), args,
+                                                       suffix=method_name.lower(), task_id=task_id)
+                    if args.wandb:
+                        import wandb
+                        wandb.log({f"Anomaly Histogram TASK {task_id}/{method_name}": wandb.Image(hist_path)})
 
-                # OOD 로더를 마지막 열로 추가
-                task_id_loaders.append(ood_loader)
-                col_names = [f"T{idx+1}" for idx in range(len(id_task_datasets))] + ["OOD"]
-
-                # TE × (tasks+OOD) 점수 수집
-                grid_scores = [[None for _ in range(len(task_id_loaders))]
-                               for _ in range(len(task_experts))]
-
-                learner._network.eval()
-                with torch.no_grad():
-                    for col_idx, ldr in enumerate(task_id_loaders):
-                        for inputs, _ in ldr:
-                            inputs = inputs.to(device)
-                            feats = extract_feats(inputs)
-                            for row_idx, cls in enumerate(task_experts):
-                                logit = cls(feats).squeeze()
-                                score = torch.sigmoid(logit) if args.te_score_type == "sigmoid" else logit
-                                conf  = 1.0 - score if args.te_score_type == "sigmoid" else -score
-                                if grid_scores[row_idx][col_idx] is None:
-                                    grid_scores[row_idx][col_idx] = conf.cpu()
-                                else:
-                                    grid_scores[row_idx][col_idx] = torch.cat([
-                                        grid_scores[row_idx][col_idx],
-                                        conf.cpu()
-                                    ], dim=0)
-
-                # === Grid 히스토그램 시각화 ===
-                # (1) 범위 계산 (전 subplot 공통 범위)
-                global_min = min([torch.min(x).item() for row in grid_scores for x in row])
-                global_max = max([torch.max(x).item() for row in grid_scores for x in row])
-
-                n_rows, n_cols = len(task_experts), len(task_id_loaders)
-                fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.2 * n_rows), squeeze=False)
-
-                for r in range(n_rows):
-                    for c in range(n_cols):
-                        ax = axes[r][c]
-                        data_cell = grid_scores[r][c].numpy()
-                        ax.hist(data_cell, bins=30, range=(global_min, global_max), color="steelblue", alpha=0.7)
-                        # 축 라벨 및 타이틀
-                        if r == 0:
-                            ax.set_title(col_names[c])
-                        if c == 0:
-                            ax.set_ylabel(f"TE{r+1}")
-                        # x-축 범위 및 틱
-                        ax.set_xlim(global_min, global_max)
-                        ax.tick_params(axis='x', labelsize=6)
-                        ax.set_yticks([])
-                        # 셀별 값 범위 텍스트
-                        cell_min, cell_max = data_cell.min(), data_cell.max()
-                        ax.text(0.5, 0.9, f"[{cell_min:.1f}, {cell_max:.1f}]", transform=ax.transAxes,
-                                ha='center', va='top', fontsize=6, color='dimgray')
-                plt.tight_layout()
-                wandb.log({f"TE_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
-                plt.close(fig)
+                binary_labels = np.concatenate([np.ones(id_scores.shape[0]), np.zeros(ood_scores.shape[0])])
+                all_scores = np.concatenate([id_scores.numpy(), ood_scores.numpy()])
+                fpr, tpr, _ = metrics.roc_curve(binary_labels, all_scores, drop_intermediate=False)
+                auroc = metrics.auc(fpr, tpr)
+                idx_tpr95 = np.abs(tpr - 0.95).argmin()
+                fpr_at_tpr95 = fpr[idx_tpr95]
+                print(f"[{method_name}]: AUROC {auroc * 100:.2f}% | FPR@TPR95 {fpr_at_tpr95 * 100:.2f}%")
+                if args.wandb:
+                    import wandb
+                    wandb.log({f"{method_name}_AUROC (↑)": auroc * 100,
+                               f"{method_name}_FPR@TPR95 (↓)": fpr_at_tpr95 * 100,
+                               "TASK": task_id})
+                results[method_name] = {"auroc": auroc, "fpr_at_tpr95": fpr_at_tpr95, "scores": all_scores}
+            continue  # 다음 method 로
         else:
             # 네트워크 모델을 위한 래퍼 클래스 생성
             class ModelWrapper:
@@ -636,7 +763,7 @@ def vil_train(args):
             task_experts.append(cls)
 
         A_last, A_avg, F = evaluate_till_now(
-            learner, loaders, devices[0], tid, acc_matrix, args
+            learner, loaders, devices[0], tid, acc_matrix, args, task_experts
         )
         log_book["A_last"].append(A_last)
         log_book["A_avg"].append(A_avg)
@@ -732,7 +859,13 @@ def get_parser():
                    help='Feature type for task expert: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
     p.add_argument('--te_score_type', type=str, default='logit', choices=['sigmoid','logit'],
                    help='Score type for TE OOD confidence: use sigmoid probability or raw logit')
-
+    # --- New TE uncertainty hyper-parameters ---
+    p.add_argument('--te_agg_methods', type=str, default='max',
+                   help='Comma-separated aggregation methods for TE OOD score (max,mean,wsum,std)')
+    p.add_argument('--te_mc_passes', type=int, default=10,
+                   help='Number of MC-dropout forward passes for TE uncertainty estimation')
+    p.add_argument('--te_dropout', type=float, default=0.2,
+                   help='Dropout probability used in TE classifier')
     # --- Blur/Noise 하이퍼파라미터 ---
     p.add_argument('--te_noise_std', type=float, default=0.2,
                    help='Blur OOD 샘플에 추가할 가우시안 노이즈 표준편차')

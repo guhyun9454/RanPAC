@@ -190,8 +190,18 @@ def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
         sample_x, _ = combined_dataset[0]
         feat_dim = extract_feats(sample_x.unsqueeze(0).to(device)).shape[1]
 
-    # 3) classifier 정의 (simple logistic regression)
-    classifier = torch.nn.Linear(feat_dim, 1).to(device)
+    # 3) classifier 정의 (Dropout 포함 binary classifier)
+    class TEClassifier(torch.nn.Module):
+        def __init__(self, input_dim, dropout_prob=0.2):
+            super().__init__()
+            self.dropout = torch.nn.Dropout(p=dropout_prob)
+            self.fc = torch.nn.Linear(input_dim, 1)
+
+        def forward(self, x):
+            x = self.dropout(x)
+            return self.fc(x).squeeze()
+
+    classifier = TEClassifier(feat_dim, dropout_prob=args.te_dropout).to(device)
     criterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(classifier.parameters(), lr=args.te_lr)
 
@@ -326,23 +336,24 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
 
     from OODdetectors.ood_adapter import SUPPORTED_METHODS, compute_ood_scores
 
-    EXTRA_METHODS = ["TE"]
+    # 새로운 TE 메소드들만 유지
+    EXTRA_METHODS = ["TE_MAXLOGIT", "TE_UNCERTAINTY"]
 
     if ood_method == "ALL":
-        methods = SUPPORTED_METHODS + EXTRA_METHODS
+        methods = SUPPORTED_METHODS + ["TE_MAXLOGIT", "TE_UNCERTAINTY"]
     else:
         # 쉼표로 구분된 메소드들 처리
         methods = [method.strip().upper() for method in ood_method.split(',')]
         # 지원되지 않는 메소드 확인
-        unsupported = [m for m in methods if m not in (SUPPORTED_METHODS + EXTRA_METHODS)]
+        unsupported = [m for m in methods if m not in (SUPPORTED_METHODS + ["TE_MAXLOGIT", "TE_UNCERTAINTY"]) ]
         if unsupported:
-            raise ValueError(f"지원되지 않는 OOD 메소드: {unsupported}. 지원되는 메소드: {SUPPORTED_METHODS + EXTRA_METHODS}")
+            raise ValueError(f"지원되지 않는 OOD 메소드: {unsupported}. 지원되는 메소드: {SUPPORTED_METHODS + ['TE_MAXLOGIT','TE_UNCERTAINTY']}")
 
     from sklearn import metrics
     results = {}
 
     for method in methods:
-        if method == "TE":
+        if method == "TE_MAXLOGIT":
             if not task_experts:
                 raise ValueError("TE 평가를 위해서는 task_experts 리스트가 필요합니다.")
 
@@ -463,8 +474,74 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                         ax.text(0.5, 0.9, f"[{cell_min:.1f}, {cell_max:.1f}]", transform=ax.transAxes,
                                 ha='center', va='top', fontsize=6, color='dimgray')
                 plt.tight_layout()
-                wandb.log({f"TE_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
+                wandb.log({f"TE_maxlogit_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
                 plt.close(fig)
+        elif method == "TE_UNCERTAINTY":
+            if not task_experts:
+                raise ValueError("TE 평가를 위해서는 task_experts 리스트가 필요합니다.")
+
+            feature_type = args.te_feature.lower()
+
+            def extract_feats(inputs):
+                if feature_type == 'logits':
+                    return learner._network(inputs)["logits"].detach()
+
+                feats = learner._network.convnet(inputs).detach()
+
+                if feature_type in {'rp', 'decorr'}:
+                    W_rand = getattr(learner, 'W_rand', None)
+                    if W_rand is None:
+                        W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
+                    if W_rand is not None:
+                        feats = F.relu(feats @ W_rand)
+                    if feature_type == 'rp':
+                        return feats
+
+                if feature_type == 'decorr':
+                    G = getattr(learner, 'G', None)
+                    eps = 1000000
+                    G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+                    feats = feats @ G_inv
+                    return feats
+
+                return feats
+
+            def _gather_te_uncertainty_scores(loader):
+                all_scores = []
+                learner._network.eval()
+                # TE 분류기의 기존 mode 저장 후 dropout 활성화를 위해 train 모드 전환
+                original_modes = [cls.training for cls in task_experts]
+                for cls in task_experts:
+                    cls.train()
+                with torch.no_grad():
+                    for inputs, _ in loader:
+                        inputs = inputs.to(device)
+                        feats = extract_feats(inputs)
+
+                        # 각 TE별 MC Dropout std 계산
+                        te_stds = []
+                        for cls in task_experts:
+                            # P x B logits
+                            logits_mc = []
+                            for _ in range(args.te_mc_passes):
+                                logit = cls(feats).squeeze()
+                                logits_mc.append(logit)
+                            logits_mc = torch.stack(logits_mc, dim=0)  # (P, B)
+                            std_per_sample = torch.std(logits_mc, dim=0, unbiased=False)  # (B,)
+                            te_stds.append(std_per_sample)
+                        te_stds = torch.stack(te_stds, dim=0)  # (num_te, B)
+
+                        # min std across TE -> OOD score (작을수록 ID), ID confidence는 음수 부호
+                        min_std, _ = te_stds.min(dim=0)  # (B,)
+                        conf = -min_std  # 큰 값일수록 ID
+                        all_scores.append(conf.cpu())
+                # TE 분류기 mode 복구
+                for mode, cls in zip(original_modes, task_experts):
+                    cls.train(mode) if mode else cls.eval()
+                return torch.cat(all_scores, dim=0)
+
+            id_scores = _gather_te_uncertainty_scores(id_loader)
+            ood_scores = _gather_te_uncertainty_scores(ood_loader)
         else:
             # 네트워크 모델을 위한 래퍼 클래스 생성
             class ModelWrapper:
@@ -732,6 +809,10 @@ def get_parser():
                    help='Feature type for task expert: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
     p.add_argument('--te_score_type', type=str, default='logit', choices=['sigmoid','logit'],
                    help='Score type for TE OOD confidence: use sigmoid probability or raw logit')
+    p.add_argument('--te_mc_passes', type=int, default=10,
+                   help='TE_UNCERTAINTY에서 MC Dropout 반복 횟수')
+    p.add_argument('--te_dropout', type=float, default=0.2,
+                   help='TE 분류기 Dropout 비율')
 
     # --- Blur/Noise 하이퍼파라미터 ---
     p.add_argument('--te_noise_std', type=float, default=0.2,

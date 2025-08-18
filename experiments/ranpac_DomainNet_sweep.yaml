@@ -18,16 +18,17 @@ parameters:
   num_tasks:
     value: 30
   data_path:
-    value: /local_datasets
+    value: /local_datasets/VIL
   IL_mode:
     value: vil
   
   # --- 모델 및 시드 ---
   seed:
-    values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
   M:
-    value: 10000
-
+    value: 1000
+  ood_develop:
+    value: 10000  
   # --- OOD 설정 ---
   ood_dataset:
     value: CORe50

@@ -307,30 +307,22 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
     learner._network.eval()
     
     ood_method = args.ood_method.upper()
-    rand_feat_mode = bool(getattr(args, 'ood_dataset', None)) and str(args.ood_dataset).lower() == 'rand_feat'
 
     # 1) 데이터셋 크기 맞추기
-    id_size = len(id_datasets)
-    if rand_feat_mode:
-        ood_size = id_size
-        min_size = id_size
-    else:
-        ood_size = len(ood_dataset)
-        min_size = min(id_size, ood_size)
+    id_size, ood_size = len(id_datasets), len(ood_dataset)
+    min_size = min(id_size, ood_size)
     if args.develop:
-        # develop 모드에서는 샘플 수를 제한합니다.
-        min_size = min(min_size, 1000)
+        min_size = 1000
     if args.ood_develop:
         min_size = args.ood_develop
     if args.verbose:
         print(f"ID dataset size: {id_size}, OOD dataset size: {ood_size}. Using {min_size} samples each for evaluation.")
 
     id_dataset_aligned = RandomSampleWrapper(id_datasets, min_size, args.seed) if id_size > min_size else id_datasets
-    if not rand_feat_mode:
-        ood_dataset_aligned = RandomSampleWrapper(ood_dataset, min_size, args.seed) if ood_size > min_size else ood_dataset
+    ood_dataset_aligned = RandomSampleWrapper(ood_dataset, min_size, args.seed) if ood_size > min_size else ood_dataset
 
     id_loader = torch.utils.data.DataLoader(id_dataset_aligned, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-    ood_loader = None if rand_feat_mode else torch.utils.data.DataLoader(ood_dataset_aligned, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    ood_loader = torch.utils.data.DataLoader(ood_dataset_aligned, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     from OODdetectors.ood_adapter import SUPPORTED_METHODS, compute_ood_scores
 
@@ -346,15 +338,6 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
         if unsupported:
             raise ValueError(f"지원되지 않는 OOD 메소드: {unsupported}. 지원되는 메소드: {SUPPORTED_METHODS + EXTRA_METHODS}")
 
-    # rand_feat 모드에서는 TE 만 지원
-    if rand_feat_mode:
-        orig_methods = methods
-        methods = [m for m in methods if m == "TE"]
-        if not methods:
-            methods = ["TE"]
-        if args.verbose and orig_methods != methods:
-            print(f"rand_feat OOD 모드: 비-TE 방법 {set(orig_methods) - set(methods)} 는 건너뜁니다. TE만 수행합니다.")
-
     from sklearn import metrics
     results = {}
 
@@ -367,9 +350,6 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
             feature_type = args.te_feature.lower()
 
             def extract_feats(inputs):
-                # 이미 피처 텐서로 들어온 경우 통과
-                if isinstance(inputs, torch.Tensor) and inputs.dim() == 2:
-                    return inputs
                 if feature_type == 'logits':
                     return learner._network(inputs)["logits"].detach()
 
@@ -417,26 +397,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 return torch.cat(all_scores, dim=0)
 
             id_scores  = _gather_te_scores(id_loader, "ID")
-
-            # rand_feat 모드일 경우: OOD를 랜덤 피처로 생성
-            if rand_feat_mode:
-                # 피처 차원 산출 (ID 배치 1개로)
-                with torch.no_grad():
-                    for _inputs, _ in id_loader:
-                        feat_sample = extract_feats(_inputs.to(device))
-                        feat_dim = feat_sample.shape[1]
-                        break
-                gen = torch.Generator()
-                gen.manual_seed(args.seed)
-                rand_feats = torch.randn(min_size, feat_dim, generator=gen)
-                rand_labels = torch.zeros(min_size, dtype=torch.long)
-                from torch.utils.data import TensorDataset, DataLoader
-                rand_ds = TensorDataset(rand_feats, rand_labels)
-                te_ood_loader = DataLoader(rand_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
-                ood_scores = _gather_te_scores(te_ood_loader, "RAND_FEAT")
-            else:
-                te_ood_loader = ood_loader
-                ood_scores = _gather_te_scores(te_ood_loader, "OOD")
+            ood_scores = _gather_te_scores(ood_loader, "OOD")
             if args.wandb:
                 import matplotlib.pyplot as plt
                 import wandb
@@ -450,7 +411,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                                    for ds in id_task_datasets]
 
                 # OOD 로더를 마지막 열로 추가
-                task_id_loaders.append(te_ood_loader)
+                task_id_loaders.append(ood_loader)
                 col_names = [f"T{idx+1}" for idx in range(len(id_task_datasets))] + ["OOD"]
 
                 # TE × (tasks+OOD) 점수 수집
@@ -505,10 +466,6 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 wandb.log({f"TE_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
                 plt.close(fig)
         else:
-            if rand_feat_mode:
-                if args.verbose:
-                    print(f"rand_feat OOD 모드에서는 {method} 평가를 건너뜁니다 (TE만 지원).")
-                continue
             # 네트워크 모델을 위한 래퍼 클래스 생성
             class ModelWrapper:
                 def __init__(self, network):
@@ -577,10 +534,7 @@ def vil_train(args):
 
     loaders, class_mask, domain_list = build_continual_dataloader(args)
     if args.ood_dataset:
-        if str(args.ood_dataset).lower() == 'rand_feat':
-            loaders[-1]['ood'] = None  # rand_feat는 평가 시 피처를 동적으로 생성
-        else:
-            loaders[-1]['ood'] = get_ood_dataset(args.ood_dataset, args)
+        loaders[-1]['ood'] = get_ood_dataset(args.ood_dataset, args)
 
     # OOD 학습용 데이터셋 준비 (optional)
     # --ood_train_dataset 인자에 여러 개의 데이터셋을 콤마(,)로 나열하면

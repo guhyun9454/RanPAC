@@ -134,7 +134,77 @@ class BlurNoiseWrapper(torch.utils.data.Dataset):
 def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
     """현재 task에 대한 binary TE(Task Expert) classifier(0:ID, 1:OOD)를 학습합니다."""
 
-    # 1) 데이터셋 크기 맞추기
+    # rand_feat 모드: 외부 OOD 이미지 대신 랜덤 feature를 생성하여 OOD로 사용
+    ood_flag = getattr(args, 'ood_train_dataset', None)
+    if isinstance(ood_flag, str) and ood_flag.lower() == 'rand_feat':
+        feature_type = args.te_feature.lower()
+
+        def extract_feats(inputs):
+            if feature_type == 'logits':
+                return learner._network(inputs)["logits"].detach()
+            feats = learner._network.convnet(inputs).detach()
+            if feature_type == 'rp':
+                W_rand = getattr(learner, 'W_rand', None)
+                if W_rand is None:
+                    W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
+                if W_rand is not None:
+                    return F.relu(feats @ W_rand)
+                return feats
+            elif feature_type == 'decorr':
+                G = getattr(learner, 'G', None)
+                W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
+                feats = F.relu(feats @ W_rand)
+                eps = 1000000
+                G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+                return feats @ G_inv
+            return feats
+
+        # feature dimension 파악 (ID 샘플 기반)
+        with torch.no_grad():
+            sample_x, _ = id_dataset[0]
+            if not isinstance(sample_x, torch.Tensor):
+                sample_x = T.ToTensor()(sample_x)
+            feat_dim = extract_feats(sample_x.unsqueeze(0).to(device)).shape[1]
+
+        classifier = torch.nn.Linear(feat_dim, 1).to(device)
+        criterion = torch.nn.BCEWithLogitsLoss()
+        optimizer = torch.optim.Adam(classifier.parameters(), lr=args.te_lr)
+
+        id_loader = torch.utils.data.DataLoader(
+            id_dataset,
+            batch_size=args.te_batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+        )
+
+        classifier.train()
+        for epoch in range(args.te_epochs):
+            epoch_loss = 0.0
+            for imgs, _ in id_loader:
+                imgs = imgs.to(device)
+                with torch.no_grad():
+                    feats_id = extract_feats(imgs)
+                feats_ood = torch.randn_like(feats_id)
+
+                feats = torch.cat([feats_id, feats_ood], dim=0)
+                labels = torch.cat([
+                    torch.zeros(feats_id.size(0), device=device),
+                    torch.ones(feats_id.size(0), device=device)
+                ], dim=0)
+
+                logits = classifier(feats).squeeze()
+                loss = criterion(logits, labels)
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+            print(f"Epoch {epoch+1}/{args.te_epochs} loss: {epoch_loss/len(id_loader):.4f}")
+        classifier.eval()
+        return classifier
+
+    # 1) 데이터셋 크기 맞추기 (기존 경로: 외부 OOD 이미지 사용)
     id_size, ood_size = len(id_dataset), len(ood_dataset)
     min_size = min(id_size, ood_size)
     if args.develop:
@@ -542,8 +612,8 @@ def vil_train(args):
     if args.ood_train_dataset:
         dataset_names = [name.strip() for name in args.ood_train_dataset.split(',') if name.strip()]
 
-        # 'random' 또는 'blur' 옵션은 per-task 단계에서 동적으로 생성하므로 여기서는 None 으로 처리
-        if len(dataset_names) == 1 and dataset_names[0].lower() in {"random", "blur"}:
+        # 'random', 'blur', 'rand_feat' 옵션은 per-task 단계에서 동적으로 처리
+        if len(dataset_names) == 1 and dataset_names[0].lower() in {"random", "blur", "rand_feat"}:
             ood_train_dataset = None
         elif len(dataset_names) == 1:
             ood_train_dataset = get_ood_dataset(dataset_names[0], args)
@@ -614,12 +684,16 @@ def vil_train(args):
                                                noise_std=args.te_noise_std,
                                                blur_kernel=args.te_blur_kernel,
                                                blur_sigma=args.te_blur_sigma)
+            elif ood_flag == "rand_feat":
+                # rand_feat 모드는 train_te_classifier 내부에서 랜덤 feature를 생성하므로
+                # 여기서는 placeholder 로 None을 유지하고 시각화는 건너뜁니다.
+                ood_ds_task = None
 
             else:
                 ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
 
-            # 샘플 시각화 wandb 로깅 (최대 20장)
-            if args.wandb:
+            # 샘플 시각화 wandb 로깅 (최대 20장) — rand_feat 에서는 스킵
+            if args.wandb and ood_ds_task is not None:
                 import wandb, torchvision.utils as vutils
                 n_vis = min(20, len(ood_ds_task))
                 idxs = torch.randint(0, len(ood_ds_task), (n_vis,))
@@ -724,7 +798,7 @@ def get_parser():
 
     # === Task-specific OOD classifier 관련 인자 ===
     p.add_argument('--ood_train_dataset', type=str, default=None,
-                   help='OOD 데이터셋 지정: "random"(가우시안), "blur"(ID 블러+노이즈) 또는 콤마로 구분된 실제 OOD 데이터셋 이름 목록(e.g., "EMNIST,KMNIST")')
+                   help='OOD 데이터셋 지정: "random"(가우시안 이미지), "blur"(ID 블러+노이즈), "rand_feat"(랜덤 피처를 OOD로 사용) 또는 콤마로 구분된 실제 OOD 데이터셋 이름 목록(e.g., "EMNIST,KMNIST")')
     p.add_argument('--te_epochs', type=int, default=1, help='Epochs to train task expert binary classifier')
     p.add_argument('--te_lr', type=float, default=1e-3, help='Learning rate for task expert binary classifier')
     p.add_argument('--te_batch_size', type=int, default=256, help='Batch size for task expert binary classifier')

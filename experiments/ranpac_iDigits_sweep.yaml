@@ -1,0 +1,50 @@
+# ranpac_sweep.yaml (수정된 버전)
+name: RanPAC_sweep
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --use_RP  # 여기에 플래그를 직접 추가
+  - ${args}
+program: vil_main.py
+method: grid
+metric:
+  name: val/accuracy_last_task
+  goal: maximize
+parameters:
+  # --- 기본 설정 ---
+  dataset:
+    value: iDigits
+  num_tasks:
+    value: 20
+  data_path:
+    value: /local_datasets
+  IL_mode:
+    value: vil
+  
+  # --- 모델 및 시드 ---
+  seed:
+    values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+  M:
+    value: 1000
+  ood_develop:
+    value: 10000
+  # --- OOD 설정 ---
+  ood_dataset:
+    value: EMNIST
+  ood_method:
+    value: MSP,MAXLOGIT,ENERGY,GEN,PRO_GEN
+  gen_gamma:
+    value: 0.01
+  gen_M:
+    value: 3
+  pro_gen_gd_steps:
+    value: 3
+  pro_gen_noise_level:
+    value: "5e-4"
+    
+  # --- WandB 설정 ---
+  wandb_project:
+    value: MainTable_iDigits
+  wandb_run:
+    value: RanPAC

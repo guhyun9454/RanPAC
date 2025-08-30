@@ -266,6 +266,8 @@ class Learner(BaseLearner):
             losses = 0.0
             correct, total = 0, 0
             for i, (_, inputs, targets) in enumerate(train_loader):
+                if self.args["develop"] and i > 3:
+                    break
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
                 loss = F.cross_entropy(logits, targets)

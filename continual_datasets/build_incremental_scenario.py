@@ -97,11 +97,13 @@ def build_continual_dataloader(args):
             if args.dataset in ['CORe50']:
                 splited_dataset = [(dataset_train[i], dataset_val) for i in range(len(dataset_train))]
                 args.num_classes = len(dataset_val.classes)
-                class_mask = [list(dataset_val.classes) for i in range(args.num_tasks)]
+                # 문자열 대신 정수 인덱스(0부터 num_classes-1까지)로 생성
+                class_mask = [[j for j in range(args.num_classes)] for i in range(args.num_tasks)]
             else:
                 splited_dataset = [(dataset_train[i], dataset_val[i]) for i in range(len(dataset_train))]
                 args.num_classes = len(dataset_val[0].classes)
-                class_mask = [list(dataset_val[0].classes) for i in range(args.num_tasks)]
+                # 문자열 대신 정수 인덱스(0부터 num_classes-1까지)로 생성
+                class_mask = [[j for j in range(args.num_classes)] for i in range(args.num_tasks)]
     
     elif mode in ['joint']:
         if 'iDigits' in args.dataset:
@@ -165,21 +167,22 @@ def build_continual_dataloader(args):
 
         dataloader.append({'train': data_loader_train, 'val': data_loader_val})
 
-    print(f"{'TASK INFO':=^60}")
-    print(f"{'IL mode':<20} => {args.IL_mode}")
-    print(f"{'Dataset':<20} => {args.dataset}")
-    print(f"{'Number of tasks':<20} => {args.num_tasks}")
-    print(f"{'Number of classes':<20} => {args.num_classes}")
-    print(f"{'Number of domains':<20} => {args.num_domains}")
-    print("domain_list:", domain_list)
-    print("class_mask:", class_mask)
-    print("dataloader: ",len(dataloader))
-    print(f"{'Sequence of Tasks':=^60}")    
-    for t_id in range(args.num_tasks):
-        dom_info = domain_list[t_id] if domain_list is not None else "N/A"
-        cls_info = class_mask[t_id] if class_mask is not None else "N/A"
-        print(f"Task {t_id+1} => domain(s): {dom_info}, classes: {cls_info}")
-    print(f"{'':=^60}")
+    if args.verbose or args.develop_tasks:
+        print(f"{'TASK INFO':=^60}")
+        print(f"{'IL mode':<20} => {args.IL_mode}")
+        print(f"{'Dataset':<20} => {args.dataset}")
+        print(f"{'Number of tasks':<20} => {args.num_tasks}")
+        print(f"{'Number of classes':<20} => {args.num_classes}")
+        print(f"{'Number of domains':<20} => {args.num_domains}")
+        print("domain_list:", domain_list)
+        print("class_mask:", class_mask)
+        print("dataloader: ",len(dataloader))
+        print(f"{'Sequence of Tasks':=^60}")    
+        for t_id in range(args.num_tasks):
+            dom_info = domain_list[t_id] if domain_list is not None else "N/A"
+            cls_info = class_mask[t_id] if class_mask is not None else "N/A"
+            print(f"Task {t_id+1} => domain(s): {dom_info}, classes: {cls_info}")
+        print(f"{'':=^60}")
 
     return dataloader, class_mask, domain_list
 

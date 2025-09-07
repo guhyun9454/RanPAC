@@ -12,6 +12,7 @@ from RanPAC import Learner
 from continual_datasets.dataset_utils import set_data_config
 from continual_datasets.dataset_utils import get_ood_dataset
 from continual_datasets.dataset_utils import RandomSampleWrapper, UnknownWrapper
+from continual_datasets.simple_replay import SimpleReplayBuffer
 
 from torch.utils.data import ConcatDataset
 from utils.acc_heatmap import save_accuracy_heatmap
@@ -536,6 +537,8 @@ def vil_train(args):
     if args.ood_dataset:
         loaders[-1]['ood'] = get_ood_dataset(args.ood_dataset, args)
 
+    replay = SimpleReplayBuffer(num_per_task=getattr(args, 'replay_per_task', 0), device=devices[0])
+
     # OOD 학습용 데이터셋 준비 (optional)
     # --ood_train_dataset 인자에 여러 개의 데이터셋을 콤마(,)로 나열하면
     # 각 데이터셋을 개별적으로 로드한 뒤 ConcatDataset 으로 합칩니다.
@@ -583,14 +586,30 @@ def vil_train(args):
     for tid in range(num_tasks):
         print(f"{' Training Task ' + str(tid):=^60}")
         task_start_time = time.time()
-        
-        dm = LoaderDataManager(loaders[tid], args.num_classes, args)
+
+        if getattr(args, 'replay_per_task', 0) > 0 and len(replay) > 0:
+            mem_x, mem_y = replay.sample(len(replay))
+            mem_ds = torch.utils.data.TensorDataset(mem_x.cpu(), mem_y.cpu())
+            combined_train_ds = ConcatDataset([loaders[tid]['train'].dataset, mem_ds])
+            combined_train_loader = torch.utils.data.DataLoader(
+                combined_train_ds,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+            )
+            loader_pair = {"train": combined_train_loader, "val": loaders[tid]['val']}
+            dm = LoaderDataManager(loader_pair, args.num_classes, args)
+        else:
+            dm = LoaderDataManager(loaders[tid], args.num_classes, args)
 
         learner._cur_task            = -1
         learner._known_classes       = 0
         learner._classes_seen_so_far = 0
 
         learner.incremental_train(dm)      # FULL RanPAC pipeline
+
+        if getattr(args, 'replay_per_task', 0) > 0:
+            replay.add_examples_from_loader(loaders[tid]['train'], task_id=tid)
 
         # -----------------------------------------------------------
         # (1) Task expert(TE) classifier 학습
@@ -697,6 +716,9 @@ def get_parser():
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--develop", action="store_true")
     p.add_argument("--ood_develop", type=int, default=None)
+    # replay
+    p.add_argument("--replay_per_task", type=int, default=0,
+                   help="각 태스크 종료 시 버퍼에 저장할 샘플 수(0이면 비활성화)")
     
     # wandb 관련 인자 추가
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name")

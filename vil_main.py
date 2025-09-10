@@ -129,6 +129,130 @@ class BlurNoiseWrapper(torch.utils.data.Dataset):
         return img, -1  # dummy label
 
 # ------------------------------------------------------------------ #
+# Mahalanobis-based one-class Task Expert (TE_mah)                     #
+# ------------------------------------------------------------------ #
+def _extract_te_features(learner, inputs, device, args):
+    """공통 feature 추출기.
+
+    te_feature 옵션에 따라 다음을 반환:
+      - 'logits' : model logits
+      - 'feat'   : backbone convnet features (e.g., ViT CLS)
+      - 'rp'     : random projection 후 ReLU(features @ W_rand)
+      - 'decorr' : RP 이후 Gram decorrelation 적용
+    """
+    feature_type = getattr(args, 'te_feature', 'feat').lower()
+
+    if feature_type == 'logits':
+        return learner._network(inputs)["logits"].detach()
+
+    feats = learner._network.convnet(inputs).detach()  # (B, D)
+
+    if feature_type in {'rp', 'decorr'}:
+        W_rand = getattr(learner, 'W_rand', None)
+        if W_rand is None:
+            W_rand = getattr(getattr(learner._network, 'fc', None), 'W_rand', None)
+        if W_rand is not None:
+            feats = F.relu(feats @ W_rand)
+        if feature_type == 'rp':
+            return feats
+
+    if feature_type == 'decorr':
+        G = getattr(learner, 'G', None)
+        if G is not None:
+            eps = 1000000
+            G_inv = torch.linalg.pinv(G.to(device) + eps * torch.eye(G.shape[0], device=device))
+            feats = feats @ G_inv
+        return feats
+
+    return feats
+
+
+def fit_task_mahalanobis(learner, id_dataset, device, args):
+    """현재 task의 ID 데이터만으로 Mahalanobis 통계를 적합합니다.
+
+    Returns
+    -------
+    stats : dict with keys { 'mu': Tensor[D], 'prec': Tensor[D] or Tensor[D,D], 'cov_kind': str }
+    """
+    loader = torch.utils.data.DataLoader(
+        id_dataset,
+        batch_size=getattr(args, 'batch_size', 64),
+        shuffle=False,
+        num_workers=getattr(args, 'num_workers', 8),
+    )
+
+    use_max = getattr(args, 'te_mah_max_samples', None)
+    cov_kind = getattr(args, 'te_mah_cov', 'diag')  # 'diag' | 'full'
+    eps = float(getattr(args, 'te_mah_eps', 1e-5))
+
+    learner._network.eval()
+    feat_list = []
+    seen = 0
+    with torch.no_grad():
+        for inputs, _ in loader:
+            if use_max is not None and seen >= use_max:
+                break
+            inputs = inputs.to(device)
+            feats = _extract_te_features(learner, inputs, device, args)  # (B, D)
+            feat_list.append(feats.cpu())
+            seen += feats.size(0)
+            if use_max is not None and seen >= use_max:
+                break
+
+    X = torch.cat(feat_list, dim=0)  # (N, D) on CPU
+    mu = X.mean(dim=0)               # (D,)
+
+    if cov_kind == 'diag':
+        # Var with Bessel's correction (unbiased)
+        var = X.var(dim=0, unbiased=True) + eps  # (D,)
+        prec = 1.0 / var                         # (D,)
+        return {'mu': mu.to(device), 'prec': prec.to(device), 'cov_kind': 'diag'}
+    elif cov_kind == 'full':
+        Xc = X - mu
+        # Sample covariance: (D,D)
+        cov = (Xc.t() @ Xc) / max(1, Xc.size(0) - 1)
+        cov = cov + eps * torch.eye(cov.size(0))
+        # Use pseudo-inverse for stability
+        prec_mat = torch.linalg.pinv(cov)
+        return {'mu': mu.to(device), 'prec': prec_mat.to(device), 'cov_kind': 'full'}
+    else:
+        raise ValueError("te_mah_cov must be one of {'diag','full'}")
+
+
+def mahalanobis_min_distance(scores_feats, stats_list):
+    """배치 features와 여러 task 통계에 대해 최소 Mahalanobis 거리를 계산.
+
+    Parameters
+    ----------
+    scores_feats : Tensor[B, D]
+    stats_list   : list of dict as returned by fit_task_mahalanobis
+
+    Returns
+    -------
+    min_d2 : Tensor[B]  (각 샘플의 최소 d^2)
+    argmin_idx : Tensor[B] (최소 거리를 주는 task index)
+    """
+    B, D = scores_feats.shape
+    device = scores_feats.device
+    # 누적: (num_tasks, B)
+    all_d2 = []
+    for stats in stats_list:
+        mu = stats['mu'].to(device)
+        diff = scores_feats - mu.unsqueeze(0)  # (B, D)
+        if stats['cov_kind'] == 'diag':
+            prec = stats['prec'].to(device)    # (D,)
+            d2 = (diff.pow(2) * prec.unsqueeze(0)).sum(dim=1)  # (B,)
+        else:  # full
+            prec_mat = stats['prec'].to(device)  # (D, D)
+            # d2 = diag(diff @ P @ diff^T)
+            mid = diff @ prec_mat               # (B, D)
+            d2 = (mid * diff).sum(dim=1)        # (B,)
+        all_d2.append(d2)
+    all_d2 = torch.stack(all_d2, dim=0)  # (T, B)
+    min_d2, argmin_idx = all_d2.min(dim=0)
+    return min_d2, argmin_idx
+
+# ------------------------------------------------------------------ #
 # Task-specific OOD classifier 학습 함수
 # ------------------------------------------------------------------ #
 def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
@@ -302,7 +426,7 @@ def evaluate_till_now(model, loaders, device, task_id,
     save_accuracy_heatmap(result, task_id, args)
     return A_last, A_avg, forgetting
 
-def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, task_experts=None):
+def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, task_experts=None, mah_experts=None):
     """OOD 평가를 위한 통합 함수 (adapter 기반, TE 방식 포함)"""
     learner._network.eval()
     
@@ -326,7 +450,7 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
 
     from OODdetectors.ood_adapter import SUPPORTED_METHODS, compute_ood_scores
 
-    EXTRA_METHODS = ["TE"]
+    EXTRA_METHODS = ["TE", "TE_MAH"]
 
     if ood_method == "ALL":
         methods = SUPPORTED_METHODS + EXTRA_METHODS
@@ -465,6 +589,24 @@ def evaluate_ood(learner, id_datasets, ood_dataset, device, args, task_id=None, 
                 plt.tight_layout()
                 wandb.log({f"TE_score_grid/Task{task_id}": wandb.Image(fig), "TASK": task_id})
                 plt.close(fig)
+        elif method == "TE_MAH":
+            if not mah_experts:
+                raise ValueError("TE_MAH 평가를 위해서는 mah_experts 리스트가 필요합니다.")
+
+            def _gather_te_mah_scores(loader):
+                all_scores = []
+                learner._network.eval()
+                with torch.no_grad():
+                    for inputs, _ in loader:
+                        inputs = inputs.to(device)
+                        feats = _extract_te_features(learner, inputs, device, args)  # (B, D)
+                        min_d2, _ = mahalanobis_min_distance(feats, mah_experts)    # (B,)
+                        conf = -min_d2  # 작은 거리가 ID -> 큰 conf
+                        all_scores.append(conf.cpu())
+                return torch.cat(all_scores, dim=0)
+
+            id_scores  = _gather_te_mah_scores(id_loader)
+            ood_scores = _gather_te_mah_scores(ood_loader)
         else:
             # 네트워크 모델을 위한 래퍼 클래스 생성
             class ModelWrapper:
@@ -578,7 +720,8 @@ def vil_train(args):
     log_book   = {"A_last": [], "A_avg": [], "Forgetting": [], "Task_Time": []}
     
     total_start_time = time.time()
-    task_experts = []  # 각 task 별 binary TE classifier 저장
+    task_experts = []      # 각 task 별 binary TE classifier 저장
+    mah_experts = []       # 각 task 별 Mahalanobis 통계 저장
 
     for tid in range(num_tasks):
         print(f"{' Training Task ' + str(tid):=^60}")
@@ -593,7 +736,7 @@ def vil_train(args):
         learner.incremental_train(dm)      # FULL RanPAC pipeline
 
         # -----------------------------------------------------------
-        # (1) Task expert(TE) classifier 학습
+        # (1) Task expert(TE) classifier 학습 (binary, optional)
         # -----------------------------------------------------------
         if args.ood_train_dataset:
             id_train_dataset = loaders[tid]['train'].dataset
@@ -635,6 +778,13 @@ def vil_train(args):
             cls = train_te_classifier(learner, id_train_dataset, ood_ds_task, devices[0], args)
             task_experts.append(cls)
 
+        # -----------------------------------------------------------
+        # (2) TE_MAH (one-class) 통계 적합: 항상 ID 데이터로 적합
+        # -----------------------------------------------------------
+        id_train_dataset = loaders[tid]['train'].dataset
+        stats = fit_task_mahalanobis(learner, id_train_dataset, devices[0], args)
+        mah_experts.append(stats)
+
         A_last, A_avg, F = evaluate_till_now(
             learner, loaders, devices[0], tid, acc_matrix, args
         )
@@ -650,7 +800,7 @@ def vil_train(args):
             id_datasets = torch.utils.data.ConcatDataset(id_val_sets)
             ood_dataset = loaders[-1]['ood']
             # evaluate_ood() 호출 (원본과 동일한 로직)
-            _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_experts=task_experts)
+            _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_experts=task_experts, mah_experts=mah_experts)
         else:
             print("OOD 평가를 위한 데이터셋이 지정되지 않았습니다.")
 
@@ -740,6 +890,14 @@ def get_parser():
                    help='Blur OOD 샘플에 적용할 GaussianBlur 커널 크기 (홀수)')
     p.add_argument('--te_blur_sigma', type=float, default=3.0,
                    help='Blur OOD 샘플에 적용할 sigma 값(크면 더 강한 블러)')
+
+    # --- TE_mah 하이퍼파라미터 ---
+    p.add_argument('--te_mah_cov', type=str, default='diag', choices=['diag','full'],
+                   help='Mahalanobis 공분산 형태 (diag=대각선, full=전체)')
+    p.add_argument('--te_mah_eps', type=float, default=1e-5,
+                   help='Covariance 안정화를 위한 diagonal jitter(epsilon)')
+    p.add_argument('--te_mah_max_samples', type=int, default=None,
+                   help='학습 통계 적합 시 사용할 최대 샘플 수 (None: 전체)')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

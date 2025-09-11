@@ -129,6 +129,121 @@ class BlurNoiseWrapper(torch.utils.data.Dataset):
         return img, -1  # dummy label
 
 # ------------------------------------------------------------------ #
+# Adversarial OOD wrapper                                            #
+# ------------------------------------------------------------------ #
+class AdversarialOODWrapper(torch.utils.data.Dataset):
+
+    def __init__(self, dataset, model, device, args):
+        self.dataset = dataset
+        self.model = model
+        self.device = device
+        self.args = args
+
+        self.attack = getattr(args, 'te_adv_attack', 'pgd_ce').lower()
+        self.eps = getattr(args, 'te_adv_eps', 0.03)
+        self.alpha = getattr(args, 'te_adv_alpha', 0.01)
+        self.steps = getattr(args, 'te_adv_steps', 10)
+        self.norm = getattr(args, 'te_adv_norm', 'linf').lower()
+        self.random_start = getattr(args, 'te_adv_random_start', False)
+        self.clip_min = getattr(args, 'te_adv_clip_min', 0.0)
+        self.clip_max = getattr(args, 'te_adv_clip_max', 1.0)
+
+        # If input normalization is used, compute per-channel clipping bounds in normalized space
+        self.use_input_norm = getattr(args, 'use_input_norm', False)
+        if self.use_input_norm:
+            mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(-1, 1, 1)
+            std  = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(-1, 1, 1)
+            self._lower = ((0.0 - mean) / std)
+            self._upper = ((1.0 - mean) / std)
+        else:
+            self._lower = None
+            self._upper = None
+
+    def __len__(self):
+        return len(self.dataset)
+
+    @torch.no_grad()
+    def _pred_label(self, x):
+        self.model.eval()
+        logits = self.model(x)["logits"]
+        return logits.argmax(1)
+
+    def _compute_loss(self, logits, y_pred):
+        if 'entropy' in self.attack:
+            probs = F.softmax(logits, dim=1)
+            # maximize entropy => minimize negative entropy
+            loss = -(probs * torch.log(probs + 1e-12)).sum(dim=1).mean()
+        else:
+            # untargeted CE against current prediction
+            loss = F.cross_entropy(logits, y_pred)
+        return loss
+
+    def _linf_project(self, x_adv, x_orig):
+        return torch.min(torch.max(x_adv, x_orig - self.eps), x_orig + self.eps)
+
+    def _l2_project(self, x_adv, x_orig):
+        delta = x_adv - x_orig
+        flat = delta.view(1, -1)
+        norm = torch.norm(flat, p=2, dim=1, keepdim=True) + 1e-12
+        factor = torch.clamp(self.eps / norm, max=1.0)
+        delta = (flat * factor).view_as(delta)
+        return (x_orig + delta)
+
+    def _clamp(self, x):
+        if self._lower is not None and self._upper is not None:
+            x = torch.max(torch.min(x, self._upper), self._lower)
+            return x
+        return x.clamp(self.clip_min, self.clip_max)
+
+    def __getitem__(self, idx):
+        img, _ = self.dataset[idx]
+        if not isinstance(img, torch.Tensor):
+            img = T.ToTensor()(img)
+
+        # If upstream applied Normalize in transform, we are already in normalized space.
+        # We craft perturbations in the same space and clamp accordingly.
+        x = img.to(self.device).detach()
+        x_orig = x.clone()
+
+        # Random start for PGD
+        if ('pgd' in self.attack) and self.random_start:
+            if self.norm == 'linf':
+                x = (x + torch.empty_like(x).uniform_(-self.eps, self.eps)).clamp(self.clip_min, self.clip_max)
+            else:
+                noise = torch.randn_like(x)
+                noise = noise / (torch.norm(noise.view(-1)) + 1e-12) * self.eps
+                x = (x + noise).clamp(self.clip_min, self.clip_max)
+
+        # Prepare label (current model prediction)
+        with torch.no_grad():
+            y_pred = self._pred_label(x.unsqueeze(0))
+
+        num_steps = 1 if 'fgsm' in self.attack else max(1, int(self.steps))
+
+        for _ in range(num_steps):
+            x = x.detach().requires_grad_(True)
+            self.model.eval()
+            logits = self.model(x.unsqueeze(0))["logits"]
+            loss = self._compute_loss(logits, y_pred)
+            grad = torch.autograd.grad(loss, x, retain_graph=False, create_graph=False)[0]
+
+            if self.norm == 'linf':
+                step = self.alpha if 'pgd' in self.attack else self.eps
+                x = x + step * grad.sign()
+                x = self._linf_project(x, x_orig)
+            else:  # l2
+                grad_norm = torch.norm(grad.view(-1)) + 1e-12
+                step_vec = grad / grad_norm
+                step = self.alpha if 'pgd' in self.attack else self.eps
+                x = x + step * step_vec
+                x = self._l2_project(x, x_orig)
+
+            x = self._clamp(x)
+
+        x_adv = x.detach().cpu()
+        return x_adv, -1
+
+# ------------------------------------------------------------------ #
 # Task-specific OOD classifier 학습 함수
 # ------------------------------------------------------------------ #
 def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
@@ -543,7 +658,7 @@ def vil_train(args):
         dataset_names = [name.strip() for name in args.ood_train_dataset.split(',') if name.strip()]
 
         # 'random' 또는 'blur' 옵션은 per-task 단계에서 동적으로 생성하므로 여기서는 None 으로 처리
-        if len(dataset_names) == 1 and dataset_names[0].lower() in {"random", "blur"}:
+        if len(dataset_names) == 1 and dataset_names[0].lower() in {"random", "blur", "adversarial", "adv"}:
             ood_train_dataset = None
         elif len(dataset_names) == 1:
             ood_train_dataset = get_ood_dataset(dataset_names[0], args)
@@ -614,6 +729,15 @@ def vil_train(args):
                                                noise_std=args.te_noise_std,
                                                blur_kernel=args.te_blur_kernel,
                                                blur_sigma=args.te_blur_sigma)
+
+            elif ood_flag in {"adversarial", "adv"}:
+                # 현재 task에서 학습된 네트워크를 이용해 adversarial 샘플 생성
+                ood_ds_task = AdversarialOODWrapper(
+                    id_train_dataset,
+                    model=learner._network,
+                    device=devices[0],
+                    args=args,
+                )
 
             else:
                 ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
@@ -740,6 +864,25 @@ def get_parser():
                    help='Blur OOD 샘플에 적용할 GaussianBlur 커널 크기 (홀수)')
     p.add_argument('--te_blur_sigma', type=float, default=3.0,
                    help='Blur OOD 샘플에 적용할 sigma 값(크면 더 강한 블러)')
+
+    # --- Adversarial OOD 하이퍼파라미터 ---
+    p.add_argument('--te_adv_attack', type=str, default='pgd_ce',
+                   choices=['pgd_ce', 'fgsm_ce', 'pgd_entropy', 'fgsm_entropy'],
+                   help='Adversarial attack type for OOD generation')
+    p.add_argument('--te_adv_eps', type=float, default=0.03,
+                   help='Max perturbation radius (Linf when norm=linf, L2 when norm=l2)')
+    p.add_argument('--te_adv_alpha', type=float, default=0.01,
+                   help='PGD step size (FGSM ignores this, uses eps)')
+    p.add_argument('--te_adv_steps', type=int, default=10,
+                   help='Number of gradient steps for PGD')
+    p.add_argument('--te_adv_norm', type=str, default='linf', choices=['linf', 'l2'],
+                   help='Norm constraint for adversarial attack')
+    p.add_argument('--te_adv_random_start', action='store_true',
+                   help='Use random start for PGD')
+    p.add_argument('--te_adv_clip_min', type=float, default=0.0,
+                   help='Minimum pixel value for clipping')
+    p.add_argument('--te_adv_clip_max', type=float, default=1.0,
+                   help='Maximum pixel value for clipping')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

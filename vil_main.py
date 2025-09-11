@@ -267,7 +267,7 @@ def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
         combined_dataset,
         batch_size=args.te_batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=0,
     )
 
     # ------------------------------------------------------------

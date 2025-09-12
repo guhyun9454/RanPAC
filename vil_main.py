@@ -254,6 +254,8 @@ def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
     min_size = min(id_size, ood_size)
     if args.develop:
         min_size = min(min_size, 1000)
+    if getattr(args, 'te_adv_develop', None):
+        min_size = min(min_size, args.te_adv_develop)
 
     id_ds_aligned  = RandomSampleWrapper(id_dataset,  min_size, args.seed) if id_size  > min_size else id_dataset
     ood_ds_aligned = RandomSampleWrapper(ood_dataset, min_size, args.seed) if ood_size > min_size else ood_dataset
@@ -821,6 +823,8 @@ def get_parser():
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--develop", action="store_true")
     p.add_argument("--ood_develop", type=int, default=None)
+    p.add_argument("--te_adv_develop", type=int, default=None,
+                   help="Limit TE training samples per side (ID and OOD) to this number; keeps 1:1 balance")
     
     # wandb 관련 인자 추가
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name")

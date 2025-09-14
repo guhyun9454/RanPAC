@@ -1,0 +1,66 @@
+program: vil_main.py
+method: random
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --use_RP
+  - ${args}
+
+parameters:
+  dataset:
+    value: DomainNet
+  num_tasks:
+    value: 30
+  data_path:
+    value: /local_datasets
+  IL_mode:
+    value: vil
+  seed:
+    value: 1
+  ood_method:
+    value: TE
+  ood_dataset:
+    value: CORe50
+
+  # RanPAC / RP
+  M:
+    value: 1000
+  ood_develop:
+    value: 10000
+  # Use adversarially generated OOD samples per task
+  ood_train_dataset:
+    value: adversarial
+  te_adv_develop:
+    value: 10000
+  # TE feature & training
+  te_feature:
+    value: rp
+  te_epochs:
+    values: [3, 5, 10]
+  te_lr:
+    values: [0.0001, 0.0005, 0.001, 0.005]
+  te_batch_size:
+    value: 64
+  te_score_type:
+    values: ["logit","sigmoid"]
+
+  # Adversarial OOD hyper-parameters
+  te_adv_attack:
+    values: ["pgd_ce", "pgd_entropy", "fgsm_ce"]
+  te_adv_eps:
+    values: [0.5, 1.0, 2.0, 4.0]
+  te_adv_alpha:
+    values: [0.25, 0.5, 1.0]
+  te_adv_steps:
+    values: [3, 5, 10]
+  te_adv_norm:
+    values: ["linf", "l2"]
+
+  wandb_project:
+    value: TE_adv_DomainNet
+  wandb_run:
+    value: TE_adv
+
+

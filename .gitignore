@@ -158,4 +158,3 @@ data/**
 figures**
 results/**
 /wandb
-*.yaml

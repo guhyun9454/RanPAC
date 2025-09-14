@@ -85,50 +85,6 @@ class IDLabelWrapper(torch.utils.data.Dataset):
         return x, 0
 
 # ------------------------------------------------------------------ #
-# Synthetic OOD dataset utilities                                    #
-# ------------------------------------------------------------------ #
-class GaussianNoiseDataset(torch.utils.data.Dataset):
-    """랜덤 가우시안 노이즈 이미지를 생성하는 데이터셋."""
-    def __init__(self, num_samples, image_shape, seed=0):
-        self.num_samples = num_samples
-        self.image_shape = image_shape
-        self.rng = np.random.RandomState(seed)
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, idx):
-        img = torch.tensor(self.rng.randn(*self.image_shape), dtype=torch.float32)
-        return img, -1  # dummy label
-
-
-class BlurNoiseWrapper(torch.utils.data.Dataset):
-    """기존 ID 이미지를 GaussianBlur & 가우시안 노이즈로 변환하여 OOD 샘플을 생성합니다.
-
-    Args:
-        dataset: 원본 ID 데이터셋
-        noise_std: 추가할 가우시안 노이즈 표준편차
-        blur_kernel: GaussianBlur 커널 크기(홀수)
-        blur_sigma:  블러 강도 (sigma). 크면 더 흐려짐
-    """
-    def __init__(self, dataset, noise_std=0.2, blur_kernel=7, blur_sigma=3.0):
-        self.dataset = dataset
-        self.noise_std = noise_std
-        self.blur = T.GaussianBlur(kernel_size=blur_kernel, sigma=(blur_sigma, blur_sigma*1.5))
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        img, _ = self.dataset[idx]
-        if not isinstance(img, torch.Tensor):
-            img = T.ToTensor()(img)
-        img = self.blur(img)
-        img = img + torch.randn_like(img) * self.noise_std
-        img = torch.clamp(img, 0.0, 1.0)
-        return img, -1  # dummy label
-
-# ------------------------------------------------------------------ #
 # Task-specific OOD classifier 학습 함수
 # ------------------------------------------------------------------ #
 def train_te_classifier(learner, id_dataset, ood_dataset, device, args):
@@ -542,17 +498,10 @@ def vil_train(args):
     if args.ood_train_dataset:
         dataset_names = [name.strip() for name in args.ood_train_dataset.split(',') if name.strip()]
 
-        # 'random' 또는 'blur' 옵션은 per-task 단계에서 동적으로 생성하므로 여기서는 None 으로 처리
-        if len(dataset_names) == 1 and dataset_names[0].lower() in {"random", "blur"}:
-            ood_train_dataset = None
-        elif len(dataset_names) == 1:
+        if len(dataset_names) == 1:
             ood_train_dataset = get_ood_dataset(dataset_names[0], args)
         else:
-            # 여러 데이터셋을 로드한 뒤 하나로 결합하되, 각 데이터셋에서 동일한 개수의 샘플을 사용하도록
-            # 가장 작은 데이터셋 크기에 맞추어 RandomSampleWrapper 로 균등 샘플링합니다.
             loaded_datasets = [get_ood_dataset(n, args) for n in dataset_names]
-
-            # 가장 작은 데이터셋 크기 산출
             min_len = min(len(ds) for ds in loaded_datasets)
             balanced_datasets = []
             for idx, ds in enumerate(loaded_datasets):
@@ -598,25 +547,7 @@ def vil_train(args):
         if args.ood_train_dataset:
             id_train_dataset = loaders[tid]['train'].dataset
 
-            ood_flag = args.ood_train_dataset.lower()
-
-            if ood_flag == "random":
-                sample_img = id_train_dataset[0][0]
-                if isinstance(sample_img, torch.Tensor):
-                    img_shape = sample_img.shape
-                else:
-                    img_shape = T.ToTensor()(sample_img).shape
-                num_samples = len(id_train_dataset)
-                ood_ds_task = GaussianNoiseDataset(num_samples, img_shape, seed=args.seed + tid)
-
-            elif ood_flag == "blur":
-                ood_ds_task = BlurNoiseWrapper(id_train_dataset,
-                                               noise_std=args.te_noise_std,
-                                               blur_kernel=args.te_blur_kernel,
-                                               blur_sigma=args.te_blur_sigma)
-
-            else:
-                ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
+            ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
 
             # 샘플 시각화 wandb 로깅 (최대 20장)
             if args.wandb:
@@ -723,8 +654,7 @@ def get_parser():
     p.add_argument('--pro_ent_gd_steps', type=int, default=2, help='Gradient descent steps for PRO_ENT postprocessor')
 
     # === Task-specific OOD classifier 관련 인자 ===
-    p.add_argument('--ood_train_dataset', type=str, default=None,
-                   help='OOD 데이터셋 지정: "random"(가우시안), "blur"(ID 블러+노이즈) 또는 콤마로 구분된 실제 OOD 데이터셋 이름 목록(e.g., "EMNIST,KMNIST")')
+    p.add_argument('--ood_train_dataset', type=str, default=None)
     p.add_argument('--te_epochs', type=int, default=1, help='Epochs to train task expert binary classifier')
     p.add_argument('--te_lr', type=float, default=1e-3, help='Learning rate for task expert binary classifier')
     p.add_argument('--te_batch_size', type=int, default=256, help='Batch size for task expert binary classifier')
@@ -733,13 +663,6 @@ def get_parser():
     p.add_argument('--te_score_type', type=str, default='logit', choices=['sigmoid','logit'],
                    help='Score type for TE OOD confidence: use sigmoid probability or raw logit')
 
-    # --- Blur/Noise 하이퍼파라미터 ---
-    p.add_argument('--te_noise_std', type=float, default=0.2,
-                   help='Blur OOD 샘플에 추가할 가우시안 노이즈 표준편차')
-    p.add_argument('--te_blur_kernel', type=int, default=7,
-                   help='Blur OOD 샘플에 적용할 GaussianBlur 커널 크기 (홀수)')
-    p.add_argument('--te_blur_sigma', type=float, default=3.0,
-                   help='Blur OOD 샘플에 적용할 sigma 값(크면 더 강한 블러)')
 
     # not used but kept for compatibility
     p.add_argument("--epochs",      type=int, default=1)

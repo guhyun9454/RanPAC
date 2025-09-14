@@ -552,10 +552,17 @@ def vil_train(args):
         id_train_dataset = loaders[tid]['train'].dataset
 
         ood_ds_task = None
-        if getattr(args, 'te_negative_source', 'external') == 'external' and ood_train_dataset is not None:
-            ood_ds_task = ood_train_dataset
-        elif getattr(args, 'te_negative_source', 'external') == 'replay' and replay_buffer is not None and len(replay_buffer) > 0:
-            ood_ds_task = ReplayBufferDataset(replay_buffer)
+        neg_src = getattr(args, 'te_negative_source', 'external')
+        if neg_src == 'external':
+            if ood_train_dataset is not None:
+                ood_ds_task = ood_train_dataset
+        elif neg_src == 'replay':
+            if replay_buffer is not None and len(replay_buffer) > 0:
+                ood_ds_task = ReplayBufferDataset(replay_buffer)
+            elif ood_train_dataset is not None:
+                # 첫 task 등 버퍼가 비어있으면 외부 OOD로 대체
+                print(f"[TE] Task {tid}: replay buffer empty → fallback to external OOD dataset")
+                ood_ds_task = ood_train_dataset
 
         if ood_ds_task is not None:
             # 샘플 시각화 wandb 로깅 (최대 20장)

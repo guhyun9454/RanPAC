@@ -48,3 +48,25 @@ class SimpleReplayBuffer:
 
         idx = torch.randperm(inputs_all.size(0))[:n_samples]
         return inputs_all[idx].to(self.device), targets_all[idx].to(self.device)
+
+
+class ReplayBufferDataset(torch.utils.data.Dataset):
+    def __init__(self, buffer: SimpleReplayBuffer):
+        self.buffer = buffer
+
+    def __len__(self):
+        return sum(inputs.size(0) for inputs, _ in self.buffer.storage)
+
+    def __getitem__(self, index: int):
+        if index < 0:
+            raise IndexError("Negative index not supported")
+
+        for inputs, targets in self.buffer.storage:
+            n = inputs.size(0)
+            if index < n:
+                x = inputs[index]
+                y = targets[index]
+                return x, y
+            index -= n
+
+        raise IndexError("Index out of range for ReplayBufferDataset")

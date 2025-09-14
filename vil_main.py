@@ -12,6 +12,7 @@ from RanPAC import Learner
 from continual_datasets.dataset_utils import set_data_config
 from continual_datasets.dataset_utils import get_ood_dataset
 from continual_datasets.dataset_utils import RandomSampleWrapper, UnknownWrapper
+from continual_datasets.simple_replay import SimpleReplayBuffer, ReplayBufferDataset
 
 from torch.utils.data import ConcatDataset
 from utils.acc_heatmap import save_accuracy_heatmap
@@ -517,6 +518,10 @@ def vil_train(args):
     else:
         ood_train_dataset = None
 
+    replay_buffer = None
+    if getattr(args, 'te_negative_source', 'external') == 'replay':
+        replay_buffer = SimpleReplayBuffer(num_per_task=args.replay_num_per_task, device=devices[0])
+
     learner = Learner(vars(args))
     learner.is_dil   = True          # domain-IL branch
     learner.dil_init = False         # first task triggers PETL
@@ -544,11 +549,15 @@ def vil_train(args):
         # -----------------------------------------------------------
         # (1) Task expert(TE) classifier 학습
         # -----------------------------------------------------------
-        if args.ood_train_dataset:
-            id_train_dataset = loaders[tid]['train'].dataset
+        id_train_dataset = loaders[tid]['train'].dataset
 
-            ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
+        ood_ds_task = None
+        if getattr(args, 'te_negative_source', 'external') == 'external' and ood_train_dataset is not None:
+            ood_ds_task = ood_train_dataset
+        elif getattr(args, 'te_negative_source', 'external') == 'replay' and replay_buffer is not None and len(replay_buffer) > 0:
+            ood_ds_task = ReplayBufferDataset(replay_buffer)
 
+        if ood_ds_task is not None:
             # 샘플 시각화 wandb 로깅 (최대 20장)
             if args.wandb:
                 import wandb, torchvision.utils as vutils
@@ -565,6 +574,8 @@ def vil_train(args):
 
             cls = train_te_classifier(learner, id_train_dataset, ood_ds_task, devices[0], args)
             task_experts.append(cls)
+        else:
+            print(f"[TE] Task {tid}: negative source가 없어 TE 학습을 건너뜁니다. (source={getattr(args, 'te_negative_source', 'external')})")
 
         A_last, A_avg, F = evaluate_till_now(
             learner, loaders, devices[0], tid, acc_matrix, args
@@ -584,6 +595,9 @@ def vil_train(args):
             _ = evaluate_ood(learner, id_datasets, ood_dataset, devices[0], args, task_id=tid, task_experts=task_experts)
         else:
             print("OOD 평가를 위한 데이터셋이 지정되지 않았습니다.")
+
+        if replay_buffer is not None:
+            replay_buffer.add_examples_from_loader(loaders[tid]['train'], task_id=tid)
 
         task_time = time.time() - task_start_time
         log_book["Task_Time"].append(task_time)
@@ -655,6 +669,10 @@ def get_parser():
 
     # === Task-specific OOD classifier 관련 인자 ===
     p.add_argument('--ood_train_dataset', type=str, default=None)
+    p.add_argument('--te_negative_source', type=str, default='external', choices=['external', 'replay'],
+                   help='TE 학습 시 negative 소스 선택: external OOD 데이터셋 또는 replay 버퍼')
+    p.add_argument('--replay_num_per_task', type=int, default=256,
+                   help='각 task에서 리플레이 버퍼에 저장할 샘플 수')
     p.add_argument('--te_epochs', type=int, default=1, help='Epochs to train task expert binary classifier')
     p.add_argument('--te_lr', type=float, default=1e-3, help='Learning rate for task expert binary classifier')
     p.add_argument('--te_batch_size', type=int, default=256, help='Batch size for task expert binary classifier')

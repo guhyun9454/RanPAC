@@ -28,11 +28,6 @@ parameters:
   # RanPAC / RP
   M:
     value: 1000
-  te_adv_develop:
-    value: 10000
-  # Use adversarially generated OOD samples per task
-  ood_train_dataset:
-    value: adversarial
   ood_develop:
     value: 10000  
   # TE feature & training

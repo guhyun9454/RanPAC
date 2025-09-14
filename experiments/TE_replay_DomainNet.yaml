@@ -30,11 +30,6 @@ parameters:
     value: 1000
   ood_develop:
     value: 10000
-  # Use adversarially generated OOD samples per task
-  ood_train_dataset:
-    value: adversarial
-  te_adv_develop:
-    value: 10000
   # TE feature & training
   te_feature:
     value: rp

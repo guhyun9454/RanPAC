@@ -1,0 +1,79 @@
+program: vil_main.py
+method: random
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --use_RP
+  - ${args}
+
+parameters:
+  dataset:
+    value: iDigits
+  num_tasks:
+    value: 20
+  data_path:
+    value: /local_datasets
+  IL_mode:
+    value: vil
+  seed:
+    value: 1
+  ood_method:
+    value: TE
+  ood_dataset:
+    value: EMNIST
+
+  # RanPAC / RP
+  M:
+    value: 1000
+  ood_develop:
+    value: 10000
+
+  # Use SD-generated OOD samples per task
+  ood_train_dataset:
+    value: SDGEN
+
+  # TE feature & training
+  te_feature:
+    value: rp
+  te_epochs:
+    values: [3, 5, 10]
+  te_lr:
+    values: [0.0001, 0.0005, 0.001, 0.005]
+  te_batch_size:
+    value: 64
+  te_score_type:
+    values: ["logit", "sigmoid"]
+
+  # Stable Diffusion hyper-parameters
+  sd_model_id:
+    values: ["runwayml/stable-diffusion-v1-5", "stabilityai/stable-diffusion-2-1"]
+  sd_steps:
+    values: [15, 20, 30]
+  sd_guidance_scale:
+    values: [5.0, 7.5, 9.0]
+  sd_height:
+    value: 256
+  sd_width:
+    value: 256
+  sd_prompts:
+    values:
+      - "abstract textures and patterns, no recognizable objects"
+      - "close-up grayscale handwritten letters, high contrast, plain background || abstract ink brush strokes, monochrome, on white paper || random geometric shapes outline drawing, black lines on white"
+      - "vector icons single glyph, monochrome, centered, minimalistic || noisy textured patches, ink splatter, grayscale"
+  sd_negative_prompt:
+    values:
+      - "text, watermark, logo"
+      - "low quality, blurry, jpeg artifacts"
+  sd_num_train_per_task:
+    values: [2000, 4000]
+  sd_cache_dir:
+    value: ./sd_cache
+
+  wandb_project:
+    value: SD_TE_iDigits
+  wandb_run:
+    value: SD_TE
+
+

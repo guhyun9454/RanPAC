@@ -1,0 +1,79 @@
+program: vil_main.py
+method: random
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --use_RP
+  - ${args}
+
+parameters:
+  dataset:
+    value: DomainNet
+  num_tasks:
+    value: 30
+  data_path:
+    value: /local_datasets
+  IL_mode:
+    value: vil
+  seed:
+    value: 1
+  ood_method:
+    value: TE
+  ood_dataset:
+    value: CORe50
+
+  # RanPAC / RP
+  M:
+    value: 1000
+  ood_develop:
+    value: 10000
+
+  # Use SD-generated OOD samples per task
+  ood_train_dataset:
+    value: SDGEN
+
+  # TE feature & training
+  te_feature:
+    value: rp
+  te_epochs:
+    values: [3, 5, 10]
+  te_lr:
+    values: [0.0001, 0.0005, 0.001, 0.005]
+  te_batch_size:
+    value: 64
+  te_score_type:
+    values: ["logit", "sigmoid"]
+
+  # Stable Diffusion hyper-parameters
+  sd_model_id:
+    values: ["runwayml/stable-diffusion-v1-5", "stabilityai/stable-diffusion-2-1"]
+  sd_steps:
+    values: [15, 20, 30]
+  sd_guidance_scale:
+    values: [5.0, 7.5, 9.0]
+  sd_height:
+    value: 256
+  sd_width:
+    value: 256
+  sd_prompts:
+    values:
+      - "abstract clipart icons set on plain background || hand-drawn sketch of random objects, black lines on white || oil painting abstract strokes, colorful, no specific objects"
+      - "macro textures of fabrics and papers, shallow depth of field || fractal patterns, high detail, repeating shapes"
+      - "vector glyph icons, minimalistic, centered || abstract bokeh lights, shallow depth, colorful"
+  sd_negative_prompt:
+    values:
+      - "text, watermark, logo"
+      - "low quality, blurry, jpeg artifacts"
+  sd_num_train_per_task:
+    values: [4000, 8000]
+  sd_cache_dir:
+    value: ./sd_cache
+
+  wandb_project:
+    value: SD_TE_DomainNet
+  wandb_run:
+    value: SD_TE
+
+

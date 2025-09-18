@@ -11,11 +11,12 @@ from continual_datasets.build_incremental_scenario import build_continual_datalo
 from RanPAC import Learner
 from continual_datasets.dataset_utils import set_data_config
 from continual_datasets.dataset_utils import get_ood_dataset
-from continual_datasets.dataset_utils import RandomSampleWrapper, UnknownWrapper
+from continual_datasets.dataset_utils import RandomSampleWrapper, UnknownWrapper, build_transform
 
 from torch.utils.data import ConcatDataset
 from utils.acc_heatmap import save_accuracy_heatmap
 from utils import save_anomaly_histogram, save_logits_statistics, update_ood_hyperparams
+from utils.sd_ood import StableDiffusionOODDataset, default_prompts_for_dataset
 
 
 def seed_everything(seed: int = 42):
@@ -495,13 +496,21 @@ def vil_train(args):
     # OOD 학습용 데이터셋 준비 (optional)
     # --ood_train_dataset 인자에 여러 개의 데이터셋을 콤마(,)로 나열하면
     # 각 데이터셋을 개별적으로 로드한 뒤 ConcatDataset 으로 합칩니다.
+    use_sdgen = False
+    preloaded_ood_train_dataset = None
     if args.ood_train_dataset:
         dataset_names = [name.strip() for name in args.ood_train_dataset.split(',') if name.strip()]
+        non_sd_names = []
+        for n in dataset_names:
+            if n.upper().startswith('SDGEN'):
+                use_sdgen = True
+            else:
+                non_sd_names.append(n)
 
-        if len(dataset_names) == 1:
-            ood_train_dataset = get_ood_dataset(dataset_names[0], args)
-        else:
-            loaded_datasets = [get_ood_dataset(n, args) for n in dataset_names]
+        if len(non_sd_names) == 1:
+            preloaded_ood_train_dataset = get_ood_dataset(non_sd_names[0], args)
+        elif len(non_sd_names) > 1:
+            loaded_datasets = [get_ood_dataset(n, args) for n in non_sd_names]
             min_len = min(len(ds) for ds in loaded_datasets)
             balanced_datasets = []
             for idx, ds in enumerate(loaded_datasets):
@@ -509,13 +518,10 @@ def vil_train(args):
                     balanced_datasets.append(RandomSampleWrapper(ds, min_len, args.seed + idx))
                 else:
                     balanced_datasets.append(ds)
-
-            ood_train_dataset = ConcatDataset(balanced_datasets)
+            preloaded_ood_train_dataset = ConcatDataset(balanced_datasets)
             logging.info(
-                f"Balanced concat OOD train datasets: {dataset_names} | per-dataset samples: {min_len} | total: {len(ood_train_dataset)}"
+                f"Balanced concat OOD train datasets: {non_sd_names} | per-dataset samples: {min_len} | total: {len(preloaded_ood_train_dataset)}"
             )
-    else:
-        ood_train_dataset = None
 
     learner = Learner(vars(args))
     learner.is_dil   = True          # domain-IL branch
@@ -547,7 +553,59 @@ def vil_train(args):
         if args.ood_train_dataset:
             id_train_dataset = loaders[tid]['train'].dataset
 
-            ood_ds_task = ood_train_dataset  # 사전에 로드된 OOD 데이터셋 사용
+            # SD 기반 생성 사용 시 per-task 동적 생성
+            sd_ood_dataset = None
+            if use_sdgen:
+                try:
+                    # 프롬프트 구성
+                    if args.sd_prompts:
+                        raw = args.sd_prompts
+                        # 구분자 지원: '||' 또는 '|'
+                        seps = ['||', '|']
+                        for s in seps:
+                            if s in raw:
+                                prompts = [p.strip() for p in raw.split(s) if p.strip()]
+                                break
+                        else:
+                            prompts = [raw.strip()]
+                    else:
+                        prompts = default_prompts_for_dataset(args.dataset)
+
+                    # 샘플 수 결정
+                    target_num = args.sd_num_train_per_task if args.sd_num_train_per_task else len(id_train_dataset)
+                    target_num = int(target_num)
+
+                    sd_ood_dataset = StableDiffusionOODDataset(
+                        num_images=target_num,
+                        prompts=prompts,
+                        negative_prompt=args.sd_negative_prompt,
+                        model_id=args.sd_model_id,
+                        steps=args.sd_steps,
+                        guidance_scale=args.sd_guidance_scale,
+                        height=args.sd_height,
+                        width=args.sd_width,
+                        seed=args.seed + tid,
+                        device=devices[0],
+                        transform=build_transform(True, args),
+                        cache_dir=args.sd_cache_dir,
+                    )
+                except ImportError as e:
+                    print(str(e))
+                    sd_ood_dataset = None
+
+            # 사전 로드된 외부 OOD + SD 생성 조합 처리
+            ood_candidates = []
+            if preloaded_ood_train_dataset is not None:
+                ood_candidates.append(preloaded_ood_train_dataset)
+            if sd_ood_dataset is not None:
+                ood_candidates.append(sd_ood_dataset)
+
+            if len(ood_candidates) == 0:
+                # fallback: 외부만 지정했으나 로드 실패한 경우 에러
+                raise ValueError("OOD 학습 데이터셋을 구성할 수 없습니다. 'SDGEN' 사용 시 diffusers 설치를 확인하세요.")
+
+            from torch.utils.data import ConcatDataset as _Concat
+            ood_ds_task = ood_candidates[0] if len(ood_candidates) == 1 else _Concat(ood_candidates)
 
             # 샘플 시각화 wandb 로깅 (최대 20장)
             if args.wandb:
@@ -662,6 +720,20 @@ def get_parser():
                    help='Feature type for task expert: raw convnet feat, random-projected (rp), decorrelated Gram (decorr), or logits')
     p.add_argument('--te_score_type', type=str, default='logit', choices=['sigmoid','logit'],
                    help='Score type for TE OOD confidence: use sigmoid probability or raw logit')
+
+    # === Stable Diffusion OOD generation ===
+    p.add_argument('--sd_model_id', type=str, default='runwayml/stable-diffusion-v1-5',
+                   help='HF model id for Stable Diffusion')
+    p.add_argument('--sd_steps', type=int, default=20, help='Diffusion inference steps')
+    p.add_argument('--sd_guidance_scale', type=float, default=7.5, help='Classifier-free guidance scale')
+    p.add_argument('--sd_height', type=int, default=256, help='Generated image height')
+    p.add_argument('--sd_width', type=int, default=256, help='Generated image width')
+    p.add_argument('--sd_prompts', type=str, default=None,
+                   help='Custom prompts, separated by || or |. If None, dataset-specific defaults are used')
+    p.add_argument('--sd_negative_prompt', type=str, default=None, help='Negative prompt for SD')
+    p.add_argument('--sd_num_train_per_task', type=int, default=None,
+                   help='If set, number of SD images per task; defaults to match ID size')
+    p.add_argument('--sd_cache_dir', type=str, default=None, help='Optional cache dir for generated images')
 
 
     # not used but kept for compatibility
